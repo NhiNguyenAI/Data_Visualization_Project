@@ -1,20 +1,20 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import numpy as np
 import os
 from datetime import datetime
-import numpy as np
 
-# Configuration
+# ====================== CẤU HÌNH ỨNG DỤNG ======================
 st.set_page_config(
-    page_title="Smart Home Energy Dashboard",
+    page_title="Bảng Điều Khiển Năng Lượng Thông Minh",
     layout="wide",
     page_icon="🏠",
     initial_sidebar_state="expanded"
 )
 
-# Constants
-DEVICE_COLUMNS = [
+# ====================== KHAI BÁO HẰNG SỐ ======================
+THIET_BI = [
     'Dishwasher [kW]', 'Furnace 1 [kW]', 'Furnace 2 [kW]',
     'Home office [kW]', 'Fridge [kW]', 'Wine cellar [kW]',
     'Garage door [kW]', 'Kitchen 12 [kW]', 'Kitchen 14 [kW]',
@@ -22,97 +22,81 @@ DEVICE_COLUMNS = [
     'Microwave [kW]', 'Living room [kW]', 'Solar [kW]'
 ]
 
-WEATHER_COLUMNS = [
+THOI_TIET = [
     'temperature', 'humidity', 'windSpeed', 
     'windBearing', 'pressure', 'apparentTemperature',
     'dewPoint', 'precipProbability'
 ]
 
-# Data Loading with Robust Error Handling
-@st.cache_data(ttl=3600)
-def load_data():
-    """Load and validate the energy data with comprehensive error handling"""
-    try:
-        # Construct absolute path
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(current_dir, "data", "HomeC.csv")
-
-        # Try reading the CSV file with specified dtypes for efficiency
-        df = pd.read_csv(
-            data_path,
-            dtype={col: 'float32' for col in DEVICE_COLUMNS + WEATHER_COLUMNS},
-            low_memory=False
-        )
-
-        # Ensure the 'time' column is in the correct datetime format
-        if 'time' not in df.columns:
-            raise ValueError("The 'time' column is missing from the dataset.")
-
-        # Convert 'time' column from Unix timestamp to datetime
-        df['datetime'] = pd.to_datetime(df['time'], unit='s', errors='coerce')
-        
-        # Drop the original 'time' column if you no longer need it
-        df = df.drop(columns=['time'])
-        
-        # Handle large datasets by sampling the last 2000 rows if necessary
-        if len(df) > 500000:
-            sample_size = min(2000, len(df))  # Cap at 2000 rows
-            df = df.tail(sample_size)  # Get the last 2000 rows
-            st.warning(f"Large dataset detected. Using the last {sample_size} rows for performance.")
-
-        # Extract additional date/time-related features
-        df['date'] = df['datetime'].dt.date
-        df['hour'] = df['datetime'].dt.hour
-        df['day_of_week'] = df['datetime'].dt.dayofweek
-        df['month'] = df['datetime'].dt.month
-        df['day_name'] = df['datetime'].dt.day_name()
-        df['weekend'] = df['day_of_week'].isin([5, 6])
-
-        return df
-
-    except Exception as e:
-        st.error(f"Critical error loading data: {str(e)}")
-        st.info(f"Attempted to load from: {data_path}")
-        return None
-
-# Data Processing Pipeline with Validation
+# ====================== TIỀN XỬ LÝ DỮ LIỆU ======================
 @st.cache_data
-def preprocess_data(_df):
-    """Process and enhance the raw data with validation checks"""
+@st.cache_data
+def load_data():
+    try:
+        # Đường dẫn tới file dữ liệu (điều chỉnh cho phù hợp)
+        file_path = os.path.join("data", "HomeC.csv")
+        
+        # Đọc dữ liệu
+        data = pd.read_csv(file_path, low_memory=False)
+        
+        # Xử lý dữ liệu
+        data = data[:-1]  # Xóa dòng cuối nếu có NaN
+        
+        # Chuyển đổi cột time - xử lý lỗi nếu có
+        if 'time' in data.columns:
+            try:
+                # Thử chuyển đổi từ Unix timestamp
+                data['datetime'] = pd.to_datetime(data['time'], unit='s', errors='coerce')
+                
+                # Nếu không thành công, thử chuyển đổi trực tiếp
+                if data['datetime'].isnull().any():
+                    data['datetime'] = pd.to_datetime(data['time'], errors='coerce')
+                
+                # Đặt index là datetime
+                data = data.set_index('datetime')
+                data = data.sort_index()
+                
+            except Exception as e:
+                st.error(f"Lỗi chuyển đổi thời gian: {str(e)}")
+                # Tạo timeline mẫu nếu cần
+                data['datetime'] = pd.date_range(start='2016-01-01', periods=len(data), freq='min')
+                data = data.set_index('datetime')
+        
+        return data.dropna()
+    
+    except Exception as e:
+        st.error(f"Lỗi khi đọc dữ liệu: {str(e)}")
+        return None
+def calculate_daily(df, power_col='use [kW]'):
+    if power_col not in df.columns:
+        return pd.DataFrame()
+    # Đảm bảo chỉ tính toán trên cột số
+    return df[[power_col]].resample('D').sum() / 60  # kW -> kWh
+def calculate_hourly(df, power_col='use [kW]'):
+    """Tính tổng công suất theo từng giờ (kWh)"""
+    if power_col not in df.columns:
+        return pd.DataFrame()
+    # Tính tổng theo giờ và chuyển từ kW sang kWh (tích phân công suất)
+    return df[[power_col]].resample('H').sum() / 60  # kW * 1h = kWh
+
+@st.cache_data
+def xu_ly_du_lieu(_df):
+    """Xử lý và làm giàu dữ liệu"""
     if _df is None:
         return None
         
     df = _df.copy()
     
     try:
-        # Datetime features with validation
-        if not pd.api.types.is_datetime64_any_dtype(df['datetime']):
-            # Check for missing values or malformed rows
-            df['time'].isnull().sum(), df['time'].unique()
-            df['datetime'] = pd.to_datetime(df['time'], unit='s', errors='coerce')
-            df = df.drop(columns=['time'])
-            
-        dt = df['datetime']
-        df['date'] = dt.dt.date
-        df['hour'] = dt.dt.hour
-        df['day_of_week'] = dt.dt.dayofweek
-        df['month'] = dt.dt.month
-        df['day_name'] = dt.dt.day_name()
+        # Thêm các đặc trưng thời gian
+        df['date'] = df.index.date
+        df['hour'] = df.index.hour
+        df['day_of_week'] = df.index.dayofweek
+        df['month'] = df.index.month
+        df['day_name'] = df.index.day_name()
         df['weekend'] = df['day_of_week'].isin([5, 6])
         
-        # Energy calculations with validation
-        energy_cols = ['use [kW]', 'gen [kW]']
-        for col in energy_cols:
-            if col not in df.columns:
-                st.error(f"Missing required column: {col}")
-                return None
-                
-            # Convert to numeric and handle non-numeric values
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            if df[col].isnull().any():
-                st.warning(f"Found non-numeric values in {col}. These will be filled with 0.")
-                df[col] = df[col].fillna(0)
-        
+        # Tính toán năng lượng
         df['net_energy'] = df['use [kW]'] - df['gen [kW]']
         df['energy_ratio'] = np.where(
             df['use [kW]'] > 0,
@@ -123,379 +107,429 @@ def preprocess_data(_df):
         return df
         
     except Exception as e:
-        st.error(f"Error during data preprocessing: {str(e)}")
+        st.error(f"Lỗi khi xử lý dữ liệu: {str(e)}")
         return None
 
-# UI Components
-def render_date_filter(df, key):
-    """Render consistent date filter with validation"""
+# ====================== THÀNH PHẦN GIAO DIỆN ======================
+def loc_ngay(df, key):
+    """Hiển thị bộ lọc ngày"""
     try:
         min_date = df['date'].min()
         max_date = df['date'].max()
         
-        if pd.isnull(min_date) or pd.isnull(max_date):
-            st.error("Invalid date range in data")
-            return None
-            
         return st.date_input(
-            "Select date range",
+            "Chọn khoảng thời gian",
             [min_date, max_date],
             key=key,
             min_value=min_date,
             max_value=max_date
         )
     except Exception as e:
-        st.error(f"Error rendering date filter: {str(e)}")
+        st.error(f"Lỗi hiển thị bộ lọc: {str(e)}")
         return None
 
-def filter_data(df, date_range):
-    """Filter data based on date range with validation"""
-    if df is None or date_range is None or len(date_range) != 2:
-        return df
-        
-    try:
-        mask = (df['date'] >= date_range[0]) & (df['date'] <= date_range[1])
-        return df[mask].copy()
-    except Exception as e:
-        st.error(f"Error filtering data: {str(e)}")
-        return df
-
-def render_energy_metrics(df):
-    """Display key energy metrics with validation"""
+def hien_thi_chi_so(df):
+    """Hiển thị các chỉ số năng lượng quan trọng"""
     if df is None:
         return
         
     cols = st.columns(4)
     metrics = [
-        ("Total Consumption", 'use [kW]', "sum", "Total energy used"),
-        ("Total Production", 'gen [kW]', "sum", "Total energy generated"),
-        ("Net Energy", 'net_energy', "sum", "Net energy (use - generation)"),
-        ("Self-sufficiency", None, "ratio", "Percentage of usage covered by generation")
+        ("Tổng tiêu thụ", 'use [kW]', "sum", "Tổng năng lượng đã sử dụng"),
+        ("Tổng sản xuất", 'gen [kW]', "sum", "Tổng năng lượng tạo ra"),
+        ("Năng lượng ròng", 'net_energy', "sum", "Năng lượng thực tế (dùng - tạo)"),
+        ("Tự cung cấp", None, "ratio", "Phần trăm nhu cầu được tự đáp ứng")
     ]
     
-    for i, (label, col, mtype, help_text) in enumerate(metrics):
+    for i, (ten, cot, loai, giai_thich) in enumerate(metrics):
         with cols[i]:
             try:
-                if mtype == "sum":
-                    value = df[col].sum()
-                    st.metric(label, f"{value:,.0f} kW", help=help_text)
-                elif mtype == "ratio":
-                    ratio = (df['gen [kW]'].sum() / df['use [kW]'].sum() * 100 
+                if loai == "sum":
+                    gia_tri = df[cot].sum()
+                    st.metric(ten, f"{gia_tri:,.0f} kW", help=giai_thich)
+                elif loai == "ratio":
+                    ty_le = (df['gen [kW]'].sum() / df['use [kW]'].sum() * 100 
                            if df['use [kW]'].sum() > 0 else 0)
-                    st.metric(label, f"{ratio:.1f}%", help=help_text)
+                    st.metric(ten, f"{ty_le:.1f}%", help=giai_thich)
             except Exception as e:
-                st.error(f"Error calculating {label}: {str(e)}")
+                st.error(f"Lỗi tính toán {ten}: {str(e)}")
 
-# Dashboard Pages
-def overview_dashboard(df):
-    st.header("🏠 Energy Overview")
+# ====================== TRANG BẢNG ĐIỀU KHIỂN ======================
+def trang_tong_quan(data):
+    """Trang tổng quan năng lượng"""
+    st.header("🏠 Tổng Quan Năng Lượng")
     
-    if df is None:
-        st.warning("No data available")
+    if data is None:
+        st.warning("Không có dữ liệu")
         return
         
-    date_range = render_date_filter(df, "overview_date")
-    filtered_df = filter_data(df, date_range)
+    if 'use [kW]' not in data.columns:
+        st.error("Không tìm thấy cột 'use [kW]' trong dữ liệu")
+        st.write("Các cột số có sẵn:", data.columns.tolist())
+        return
     
-    render_energy_metrics(filtered_df)
-    st.markdown("---")
+    st.sidebar.header("Tùy chọn hiển thị")
+    min_date = data.index.min().date()
+    max_date = data.index.max().date()
     
-    resample_freq = st.selectbox(
-        "Aggregation level",
-        ["Raw", "Hourly", "Daily", "Weekly", "Monthly"],
-        index=1
-    )
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Từ ngày", min_date, min_value=min_date, max_value=max_date)
+    with col2:
+        end_date = st.date_input("Đến ngày", max_date, min_value=min_date, max_value=max_date)
     
-    freq_map = {
-        "Raw": None,
-        "Hourly": "H",
-        "Daily": "D",
-        "Weekly": "W-MON",
-        "Monthly": "M"
-    }
+    if start_date > end_date:
+        st.error("Ngày kết thúc phải sau ngày bắt đầu!")
+        return
     
     try:
-        if resample_freq != "Raw":
-            # Get numeric columns only for resampling
-            numeric_cols = filtered_df.select_dtypes(include=[np.number]).columns.tolist()
-            datetime_col = 'datetime'
-            
-            # Ensure we keep datetime column
-            if datetime_col not in numeric_cols:
-                numeric_cols.append(datetime_col)
-            
-            resampled = filtered_df[numeric_cols].set_index('datetime').resample(freq_map[resample_freq]).mean().reset_index()
-        else:
-            resampled = filtered_df
-    except Exception as e:
-        st.error(f"Error resampling data: {str(e)}")
-        return
+        filtered = data.loc[f"{start_date}":f"{end_date}"]
+        filtered = filtered.select_dtypes(include=['number'])
+        daily_energy = calculate_daily(filtered)
+        hourly_energy = calculate_hourly(filtered)
         
-    # Rest of your function remains the same...
-    tab1, tab2, tab3 = st.tabs(["📈 Energy Trends", "🌡️ Weather Impact", "📅 Temporal Patterns"])
-    
-    with tab1:
-        try:
-            fig = px.line(
-                resampled,
-                x='datetime',
-                y=['use [kW]', 'gen [kW]', 'House overall [kW]'],
-                title='Energy Flow Over Time',
-                labels={'value': 'Power (kW)', 'variable': 'Type'},
-                color_discrete_sequence=['#FF5733', '#33FF57', '#3377FF']
+        tab1, tab2 = st.tabs(["BIỂU ĐỒ THEO GIỜ", "TỔNG HỢP THEO NGÀY"])
+        
+        with tab1:
+            valid_dates = pd.Series(filtered.index.date).unique()
+            
+            if len(valid_dates) == 0:
+                st.warning("Không có dữ liệu trong khoảng thời gian đã chọn")
+                return
+                
+            selected_date = st.selectbox(
+                "Chọn ngày để xem chi tiết",
+                options=valid_dates,
+                format_func=lambda x: x.strftime("%d/%m/%Y")
             )
-            fig.update_layout(hovermode='x unified')
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.error(f"Error rendering energy trends: {str(e)}")
-    
+            
+            hourly_data = hourly_energy[hourly_energy.index.date == selected_date]
+            
+            if not hourly_data.empty:
+                # Tạo biểu đồ đường với điểm đánh dấu
+                fig = px.line(
+                    hourly_data,
+                    x=hourly_data.index,
+                    y='use [kW]',
+                    title=f"Năng lượng tiêu thụ theo giờ - Ngày {selected_date.strftime('%d/%m/%Y')}",
+                    labels={'use [kW]': 'Năng lượng (kWh)', 'datetime': 'Giờ'},
+                    markers=True,  # Thêm điểm đánh dấu tại mỗi giờ
+                    line_shape='linear'  # Dạng đường thẳng nối các điểm
+                )
+                
+                # Cấu hình thêm cho biểu đồ
+                fig.update_traces(
+                    line=dict(width=3, color='#3498db'),
+                    marker=dict(size=8, color='#e74c3c')
+                )
+                
+                fig.update_layout(
+                    xaxis_tickformat='%H:%M',
+                    hovermode="x unified",
+                    showlegend=False,
+                    yaxis_title="Năng lượng (kWh)",
+                    xaxis_title="Thời gian"
+                )
+                
+                # Thêm annotation cho giá trị cao nhất
+                max_idx = hourly_data['use [kW]'].idxmax()
+                max_val = hourly_data['use [kW]'].max()
+                fig.add_annotation(
+                    x=max_idx,
+                    y=max_val,
+                    text=f"Max: {max_val:.2f} kWh",
+                    showarrow=True,
+                    arrowhead=1,
+                    ax=0,
+                    ay=-40
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Tính toán các chỉ số
+                daily_total = hourly_data['use [kW]'].sum()
+                max_hour = hourly_data['use [kW]'].idxmax()
+                max_value = hourly_data['use [kW]'].max()
+                avg_value = hourly_data['use [kW]'].mean()
+                
+                # Hiển thị các chỉ số dưới dạng columns
+                cols = st.columns(3)
+                cols[0].metric("Tổng tiêu thụ", f"{daily_total:.2f} kWh")
+                cols[1].metric("Giờ cao điểm", max_hour.strftime('%H:%M'), f"{max_value:.2f} kWh")
+                cols[2].metric("Trung bình/giờ", f"{avg_value:.2f} kWh")
+                
+            else:
+                st.warning("Không có dữ liệu cho ngày được chọn")
+        
+        with tab2:
+            if not daily_energy.empty:
+                fig2 = px.bar(
+                    daily_energy,
+                    x=daily_energy.index,
+                    y='use [kW]',
+                    title=f"Tổng năng lượng tiêu thụ từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}",
+                    labels={'use [kW]': 'Năng lượng (kWh)'}
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+                
+                total = daily_energy['use [kW]'].sum()
+                avg = daily_energy['use [kW]'].mean()
+                
+                cols = st.columns(3)
+                cols[0].metric("Tổng năng lượng", f"{total:.2f} kWh")
+                cols[1].metric("Trung bình ngày", f"{avg:.2f} kWh")
+                cols[2].metric("Số ngày", len(daily_energy))
+            else:
+                st.warning("Không có dữ liệu trong khoảng thời gian này")
+    except Exception as e:
+        st.error(f"Lỗi khi xử lý dữ liệu: {str(e)}")
 
-
-def devices_dashboard(df):
-    st.header("🔌 Device-Level Analysis")
+def trang_thiet_bi(df):
+    """Trang phân tích theo thiết bị"""
+    st.header("🔌 Phân Tích Theo Thiết Bị")
     
     if df is None:
-        st.warning("No data available")
+        st.warning("Không có dữ liệu")
         return
         
-    date_range = render_date_filter(df, "devices_date")
-    filtered_df = filter_data(df, date_range)
+    khoang_ngay = loc_ngay(df, "thiet_bi")
+    df_loc = df[(df['date'] >= khoang_ngay[0]) & (df['date'] <= khoang_ngay[1])]
     
-    selected_devices = st.multiselect(
-        "Select devices to analyze",
-        DEVICE_COLUMNS,
-        default=DEVICE_COLUMNS[:3]
+    thiet_bi_chon = st.multiselect(
+        "Chọn thiết bị để phân tích",
+        THIET_BI,
+        default=THIET_BI[:3]
     )
     
-    if not selected_devices:
-        st.warning("Please select at least one device")
+    if not thiet_bi_chon:
+        st.warning("Vui lòng chọn ít nhất một thiết bị")
         return
     
     st.markdown("---")
     
     try:
-        device_totals = filtered_df[selected_devices].sum().sort_values(ascending=False)
-        cols = st.columns(len(selected_devices))
-        for i, (device, total) in enumerate(device_totals.items()):
+        tong_thiet_bi = df_loc[thiet_bi_chon].sum().sort_values(ascending=False)
+        cols = st.columns(len(thiet_bi_chon))
+        for i, (thiet_bi, tong) in enumerate(tong_thiet_bi.items()):
             with cols[i]:
                 st.metric(
-                    device.replace(" [kW]", ""),
-                    f"{total:,.0f} kW",
-                    help=f"Total consumption for {device}"
+                    thiet_bi.replace(" [kW]", ""),
+                    f"{tong:,.0f} kW",
+                    help=f"Tổng tiêu thụ của {thiet_bi}"
                 )
     except Exception as e:
-        st.error(f"Error calculating device totals: {str(e)}")
+        st.error(f"Lỗi tính toán tổng thiết bị: {str(e)}")
     
-    tab1, tab2, tab3 = st.tabs(["📊 Consumption Breakdown", "⏱ Usage Patterns", "🔗 Correlations"])
+    tab1, tab2, tab3 = st.tabs(["📊 Phân bổ", "⏱ Xu hướng", "🔗 Tương quan"])
     
     with tab1:
         col1, col2 = st.columns(2)
         with col1:
             try:
                 fig = px.pie(
-                    device_totals,
-                    values=device_totals.values,
-                    names=device_totals.index.str.replace(" [kW]", ""),
-                    title='Energy Share by Device'
+                    tong_thiet_bi,
+                    values=tong_thiet_bi.values,
+                    names=tong_thiet_bi.index.str.replace(" [kW]", ""),
+                    title='Tỷ lệ tiêu thụ theo thiết bị'
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"Error rendering pie chart: {str(e)}")
+                st.error(f"Lỗi hiển thị biểu đồ tròn: {str(e)}")
         
         with col2:
             try:
                 fig = px.bar(
-                    device_totals.reset_index(),
+                    tong_thiet_bi.reset_index(),
                     x='index',
                     y=0,
-                    title='Total Consumption by Device',
-                    labels={'index': 'Device', '0': 'Energy (kW)'}
+                    title='Tổng tiêu thụ theo thiết bị',
+                    labels={'index': 'Thiết bị', '0': 'Năng lượng (kW)'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"Error rendering bar chart: {str(e)}")
+                st.error(f"Lỗi hiển thị biểu đồ cột: {str(e)}")
     
     with tab2:
         try:
             fig = px.line(
-                filtered_df.set_index('datetime')[selected_devices].resample('D').mean().reset_index(),
+                df_loc.set_index('datetime')[thiet_bi_chon].resample('D').mean().reset_index(),
                 x='datetime',
-                y=selected_devices,
-                title='Daily Usage Patterns',
-                labels={'value': 'Power (kW)', 'datetime': 'Date'}
+                y=thiet_bi_chon,
+                title='Xu hướng sử dụng hàng ngày',
+                labels={'value': 'Công suất (kW)', 'datetime': 'Ngày'}
             )
             st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
-            st.error(f"Error rendering usage patterns: {str(e)}")
+            st.error(f"Lỗi hiển thị xu hướng: {str(e)}")
     
     with tab3:
         try:
             fig = px.imshow(
-                filtered_df[selected_devices].corr(),
+                df_loc[thiet_bi_chon].corr(),
                 text_auto=True,
                 aspect="auto",
-                title='Device Usage Correlations',
+                title='Mối tương quan giữa các thiết bị',
                 color_continuous_scale='RdBu',
                 zmin=-1,
                 zmax=1
             )
             st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
-            st.error(f"Error rendering correlation matrix: {str(e)}")
+            st.error(f"Lỗi hiển thị ma trận tương quan: {str(e)}")
 
-def weather_dashboard(df):
-    st.header("🌤️ Weather Impact Analysis")
+def trang_thoi_tiet(df):
+    """Trang phân tích ảnh hưởng thời tiết"""
+    st.header("🌤️ Ảnh Hưởng Thời Tiết")
     
     if df is None:
-        st.warning("No data available")
+        st.warning("Không có dữ liệu")
         return
         
-    date_range = render_date_filter(df, "weather_date")
-    filtered_df = filter_data(df, date_range)
+    khoang_ngay = loc_ngay(df, "thoi_tiet")
+    df_loc = df[(df['date'] >= khoang_ngay[0]) & (df['date'] <= khoang_ngay[1])]
     
     cols = st.columns(4)
-    weather_stats = [
-        ('temperature', '🌡️ Avg Temp', '°C'),
-        ('humidity', '💧 Avg Humidity', '%'),
-        ('windSpeed', '🌬️ Avg Wind Speed', ' km/h'),
-        ('pressure', '⏲️ Avg Pressure', ' hPa')
+    cac_thong_so = [
+        ('temperature', '🌡️ Nhiệt độ TB', '°C'),
+        ('humidity', '💧 Độ ẩm TB', '%'),
+        ('windSpeed', '🌬️ Tốc độ gió TB', ' km/h'),
+        ('pressure', '⏲️ Áp suất TB', ' hPa')
     ]
     
-    for i, (col, label, unit) in enumerate(weather_stats):
+    for i, (cot, ten, don_vi) in enumerate(cac_thong_so):
         with cols[i]:
             try:
-                avg_value = filtered_df[col].mean()
-                st.metric(label, f"{avg_value:.1f}{unit}")
+                gia_tri_tb = df_loc[cot].mean()
+                st.metric(ten, f"{gia_tri_tb:.1f}{don_vi}")
             except Exception as e:
-                st.error(f"Error calculating {label}: {str(e)}")
+                st.error(f"Lỗi tính toán {ten}: {str(e)}")
     
     st.markdown("---")
     
-    tab1, tab2 = st.tabs(["🌦 Weather Trends", "⚡ Energy Relationships"])
+    tab1, tab2 = st.tabs(["🌦 Xu hướng", "⚡ Mối quan hệ"])
     
     with tab1:
         col1, col2 = st.columns(2)
         with col1:
             try:
                 fig = px.line(
-                    filtered_df.set_index('datetime')[['temperature', 'apparentTemperature']].resample('D').mean().reset_index(),
+                    df_loc.set_index('datetime')[['temperature', 'apparentTemperature']].resample('D').mean().reset_index(),
                     x='datetime',
                     y=['temperature', 'apparentTemperature'],
-                    title='Temperature Trends',
-                    labels={'value': 'Temperature (°C)', 'datetime': 'Date'}
+                    title='Xu hướng nhiệt độ',
+                    labels={'value': 'Nhiệt độ (°C)', 'datetime': 'Ngày'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"Error rendering temperature trends: {str(e)}")
+                st.error(f"Lỗi hiển thị nhiệt độ: {str(e)}")
         
         with col2:
             try:
                 fig = px.line(
-                    filtered_df.set_index('datetime')[['humidity', 'dewPoint']].resample('D').mean().reset_index(),
+                    df_loc.set_index('datetime')[['humidity', 'dewPoint']].resample('D').mean().reset_index(),
                     x='datetime',
                     y=['humidity', 'dewPoint'],
-                    title='Humidity & Dew Point',
-                    labels={'value': 'Value', 'datetime': 'Date'}
+                    title='Độ ẩm & Điểm sương',
+                    labels={'value': 'Giá trị', 'datetime': 'Ngày'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"Error rendering humidity trends: {str(e)}")
+                st.error(f"Lỗi hiển thị độ ẩm: {str(e)}")
     
     with tab2:
         col1, col2 = st.columns(2)
         with col1:
             try:
-                sample_df = filtered_df.sample(min(1000, len(filtered_df)))
+                mau_df = df_loc.sample(min(1000, len(df_loc)))
                 fig = px.scatter(
-                    sample_df,
+                    mau_df,
                     x='temperature',
                     y='use [kW]',
                     color='hour',
                     trendline="lowess",
-                    title='Temperature vs Consumption',
-                    labels={'temperature': 'Temperature (°C)', 'use [kW]': 'Power (kW)'}
+                    title='Nhiệt độ vs Tiêu thụ',
+                    labels={'temperature': 'Nhiệt độ (°C)', 'use [kW]': 'Công suất (kW)'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"Error rendering temperature scatter: {str(e)}")
+                st.error(f"Lỗi hiển thị biểu đồ nhiệt độ: {str(e)}")
         
         with col2:
             try:
                 fig = px.scatter(
-                    filtered_df.sample(min(1000, len(filtered_df))),
+                    df_loc.sample(min(1000, len(df_loc))),
                     x='humidity',
                     y='use [kW]',
                     color='temperature',
                     trendline="lowess",
-                    title='Humidity vs Consumption',
-                    labels={'humidity': 'Humidity (%)', 'use [kW]': 'Power (kW)'}
+                    title='Độ ẩm vs Tiêu thụ',
+                    labels={'humidity': 'Độ ẩm (%)', 'use [kW]': 'Công suất (kW)'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
-                st.error(f"Error rendering humidity scatter: {str(e)}")
+                st.error(f"Lỗi hiển thị biểu đồ độ ẩm: {str(e)}")
 
-# Main App Structure
+# ====================== ỨNG DỤNG CHÍNH ======================
 def main():
-    # Load data
-    with st.spinner("Loading data..."):
+    # Tải dữ liệu
+    with st.spinner("Đang tải dữ liệu..."):
         df = load_data()
     
-    # Preprocess data
-    with st.spinner("Processing data..."):
-        processed_df = preprocess_data(df)
+    # Xử lý dữ liệu
+    with st.spinner("Đang xử lý dữ liệu..."):
+        df_xu_ly = xu_ly_du_lieu(df)
     
-    # Sidebar navigation
+    # Thanh điều hướng
     with st.sidebar:
-        st.title("🏠 Navigation")
+        st.title("🏠 Điều Hướng")
         
-        st.image("https://via.placeholder.com/150x50?text=Energy+Dashboard", width=150)
         
-        page = st.radio(
-            "Select Page",
-            ["🏠 Overview", "🔌 Devices", "🌤️ Weather"],
+        trang = st.radio(
+            "Chọn trang",
+            ["🏠 Tổng quan", "🔌 Thiết bị", "🌤️ Thời tiết"],
             index=0
         )
         
         st.markdown("---")
-        st.markdown("**Data Summary**")
+        st.markdown("**Tóm tắt dữ liệu**")
         
-        if processed_df is not None:
+        if df_xu_ly is not None:
             try:
-                st.metric("Total Records", f"{len(processed_df):,}")
-                st.metric("Date Range", 
-                         f"{processed_df['date'].min().strftime('%Y-%m-%d')} to "
-                         f"{processed_df['date'].max().strftime('%Y-%m-%d')}")
+                st.metric("Tổng số bản ghi", f"{len(df_xu_ly):,}")
+                st.metric("Khoảng thời gian", 
+                         f"{df_xu_ly['date'].min().strftime('%d/%m/%Y')} đến "
+                         f"{df_xu_ly['date'].max().strftime('%d/%m/%Y')}")
             except Exception as e:
-                st.error(f"Error displaying data summary: {str(e)}")
+                st.error(f"Lỗi hiển thị tóm tắt: {str(e)}")
         else:
-            st.warning("No data loaded")
+            st.warning("Không có dữ liệu")
         
         st.markdown("---")
-        st.markdown("**Data Export**")
+        st.markdown("**Xuất dữ liệu**")
         
-        if processed_df is not None and st.button("Generate Sample Data"):
+        if df_xu_ly is not None and st.button("Tạo mẫu dữ liệu"):
             try:
-                sample = processed_df.sample(min(1000, len(processed_df)))
-                csv = sample.to_csv(index=False).encode('utf-8')
+                mau = df_xu_ly.sample(min(1000, len(df_xu_ly)))
+                csv = mau.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="Download CSV",
+                    label="Tải xuống CSV",
                     data=csv,
-                    file_name="energy_sample.csv",
+                    file_name="mau_du_lieu.csv",
                     mime="text/csv"
                 )
             except Exception as e:
-                st.error(f"Error generating sample: {str(e)}")
+                st.error(f"Lỗi tạo mẫu: {str(e)}")
     
-    # Page routing
-    if processed_df is not None:
-        if page == "🏠 Overview":
-            overview_dashboard(processed_df)
-        elif page == "🔌 Devices":
-            devices_dashboard(processed_df)
-        elif page == "🌤️ Weather":
-            weather_dashboard(processed_df)
+    # Điều hướng trang
+    if df_xu_ly is not None:
+        if trang == "🏠 Tổng quan":
+            trang_tong_quan(df_xu_ly)
+        elif trang == "🔌 Thiết bị":
+            trang_thiet_bi(df_xu_ly)
+        elif trang == "🌤️ Thời tiết":
+            trang_thoi_tiet(df_xu_ly)
     else:
-        st.error("Failed to load data. Please check your data file and try again.")
+        st.error("Không tải được dữ liệu. Vui lòng kiểm tra file dữ liệu và thử lại.")
 
 if __name__ == "__main__":
     main()

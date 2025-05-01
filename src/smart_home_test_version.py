@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import os
+from datetime import datetime
 
-# Load data
+import os
 @st.cache_data
 def load_data():
     try:
@@ -42,32 +42,101 @@ def load_data():
         st.error(f"Lỗi khi đọc dữ liệu: {str(e)}")
         return None
 
-# Tải dữ liệu
-data = load_data()
 
-# Kiểm tra dữ liệu
-if data is not None:
-    # Hiển thị thông tin cơ bản
-    st.title("⚡ Energy Data Dashboard")
-    st.write("First 5 rows of data:", data.head())
+def calculate_daily(df, power_col='use [kW]'):
+    if power_col not in df.columns:
+        return pd.DataFrame()
+    # Đảm bảo chỉ tính toán trên cột số
+    return df[[power_col]].resample('D').sum() / 60  # kW -> kWh
+
+def main():
+    st.set_page_config(layout="wide", page_title="Phân tích điện năng")
+    st.title("📊 Bộ công cụ phân tích điện năng")
     
-    # Kiểm tra cột 'use [kW]' có tồn tại không
-    if 'use [kW]' in data.columns:
-        # Vẽ biểu đồ
-        st.subheader("Energy Consumption Over Time")
-        
-        # Lấy 1000 điểm dữ liệu đầu tiên để hiển thị nhanh
-        chart_data = data.head(1000).reset_index()
-        
-        fig = px.line(chart_data, 
-                     x='datetime', 
-                     y='use [kW]',
-                     title='Energy Usage',
-                     labels={'use [kW]': 'Power (kW)', 'datetime': 'Time'})
-        
-        st.plotly_chart(fig, use_container_width=True)
-    else:
+    data = load_data()
+    if data is None:
+        return
+    
+    if 'use [kW]' not in data.columns:
         st.error("Không tìm thấy cột 'use [kW]' trong dữ liệu")
-        st.write("Các cột có sẵn:", data.columns.tolist())
-else:
-    st.error("Không thể tải dữ liệu. Vui lòng kiểm tra đường dẫn file.")
+        st.write("Các cột số có sẵn:", data.columns.tolist())
+        return
+    
+    st.sidebar.header("Tùy chọn hiển thị")
+    min_date = data.index.min().date()
+    max_date = data.index.max().date()
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Từ ngày", min_date, min_value=min_date, max_value=max_date)
+    with col2:
+        end_date = st.date_input("Đến ngày", max_date, min_value=min_date, max_value=max_date)
+    
+    if start_date > end_date:
+        st.error("Ngày kết thúc phải sau ngày bắt đầu!")
+        return
+    
+    try:
+        filtered = data.loc[f"{start_date}":f"{end_date}"]
+        # Chỉ lấy cột số để tính toán
+        filtered = filtered.select_dtypes(include=['number'])
+        daily_energy = calculate_daily(filtered)
+        
+        tab1, tab2 = st.tabs(["BIỂU ĐỒ THEO NGÀY", "TỔNG HỢP THEO NGÀY"])
+        
+        with tab1:
+            # Lấy ngày có dữ liệu hợp lệ
+            valid_dates = pd.Series(filtered.index.date).unique()
+            
+            if len(valid_dates) == 0:
+                st.warning("Không có dữ liệu trong khoảng thời gian đã chọn")
+                return
+                
+            selected_date = st.selectbox(
+                "Chọn ngày để xem chi tiết",
+                options=valid_dates,
+                format_func=lambda x: x.strftime("%d/%m/%Y")
+            )
+            
+            hourly_data = filtered[filtered.index.date == selected_date]
+            
+            if not hourly_data.empty:
+                fig1 = px.area(
+                    hourly_data, 
+                    x=hourly_data.index, 
+                    y='use [kW]',
+                    title=f"Diễn biến công suất ngày {selected_date.strftime('%d/%m/%Y')}",
+                    labels={'use [kW]': 'Công suất (kW)'}
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+                
+                daily_kWh = hourly_data['use [kW]'].sum() / 60
+                st.metric("Tổng tiêu thụ", f"{daily_kWh:.2f} kWh")
+            else:
+                st.warning("Không có dữ liệu cho ngày được chọn")
+        
+        with tab2:
+            if not daily_energy.empty:
+                fig2 = px.bar(
+                    daily_energy,
+                    x=daily_energy.index,
+                    y='use [kW]',
+                    title=f"Tổng năng lượng tiêu thụ từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}",
+                    labels={'use [kW]': 'Năng lượng (kWh)'}
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+                
+                total = daily_energy['use [kW]'].sum()
+                avg = daily_energy['use [kW]'].mean()
+                
+                cols = st.columns(3)
+                cols[0].metric("Tổng năng lượng", f"{total:.2f} kWh")
+                cols[1].metric("Trung bình ngày", f"{avg:.2f} kWh")
+                cols[2].metric("Số ngày", len(daily_energy))
+            else:
+                st.warning("Không có dữ liệu trong khoảng thời gian này")
+    except Exception as e:
+        st.error(f"Lỗi khi xử lý dữ liệu: {str(e)}")
+
+if __name__ == "__main__":
+    main()
