@@ -67,12 +67,17 @@ def load_data():
     except Exception as e:
         st.error(f"Lỗi khi đọc dữ liệu: {str(e)}")
         return None
-def calculate_daily(df, power_col='use [kW]'):
+def calculate_daily_for_use(df, power_col='use [kW]'):
     if power_col not in df.columns:
         return pd.DataFrame()
     # Đảm bảo chỉ tính toán trên cột số
     return df[[power_col]].resample('D').sum() / 60  # kW -> kWh
-def calculate_hourly(df, power_col='use [kW]'):
+def calculate_daily_for_gen(df, power_col='gen [kW]'):
+    if power_col not in df.columns:
+        return pd.DataFrame()
+    # Đảm bảo chỉ tính toán trên cột số
+    return df[[power_col]].resample('D').sum() / 60  # kW -> kWh
+def calculate_hourly_for_use(df, power_col='use [kW]'):
     """Tính tổng công suất theo từng giờ (kWh)"""
     if power_col not in df.columns:
         return pd.DataFrame()
@@ -184,8 +189,9 @@ def trang_tong_quan(data):
     try:
         filtered = data.loc[f"{start_date}":f"{end_date}"]
         filtered = filtered.select_dtypes(include=['number'])
-        daily_energy = calculate_daily(filtered)
-        hourly_energy = calculate_hourly(filtered)           
+        daily_energy_use = calculate_daily_for_use(filtered)
+        daily_energy_gen = calculate_daily_for_gen(filtered)
+        hourly_energy_use = calculate_hourly_for_use(filtered)           
         hourly_data_gen = calculate_hourly_for_gen(filtered)
         
         tab1, tab2 = st.tabs(["NĂNG LƯỢNG TIÊU THỤ VÀ SẢN XUẤT HẰNG NGÀY", "TỔNG HỢP NĂNG LƯỢNG TIÊU THỤ VÀ SẢN XUẤT THEO NGÀY"])
@@ -204,7 +210,7 @@ def trang_tong_quan(data):
             )
             st.markdown("") 
             # 
-            hourly_data = hourly_energy[hourly_energy.index.date == selected_date]
+            hourly_data = hourly_energy_use[hourly_energy_use.index.date == selected_date]
 
             
             # Tính toán các chỉ số
@@ -319,13 +325,55 @@ def trang_tong_quan(data):
                 filtered_data = data.loc[date_mask]
                 
                 # Tính toán năng lượng theo ngày
-                daily_energy = filtered_data['use [kW]'].resample('D').sum() / 60  # Chuyển từ kW sang kWh
+                daily_energy_use = filtered_data['use [kW]'].resample('D').sum() / 60  # Chuyển từ kW sang kWh
+                daily_energy_gen = filtered_data['gen [kW]'].resample('D').sum() / 60  # Chuyển từ kW sang kWh
                 
-                if not daily_energy.empty:
+                # Tính toán các chỉ số
+                total_energy_use = daily_energy_use.sum()
+                total_energy_gen = daily_energy_gen.sum()
+                mean_energy_use = daily_energy_use.mean()
+                mean_energy_gen = daily_energy_gen.mean()
+                total_days_use = len(daily_energy_use)
+                total_days_gen = len(daily_energy_gen)
+                
+                # Hiển thị thông số tổng hợp nang lượng tiêu thụ
+                col1, col2, col3 = st.columns(3)
+                col1.metric(
+                    label="TỔNG NĂNG LƯỢNG TIÊU THỤ", 
+                    value=f"{total_energy_use:,.2f} kWh",
+                    delta=f"{total_days_use} ngày"
+                )
+                col2.metric(
+                    label="TRUNG BÌNH NĂNG LƯỢNG TIÊU THỤ THEO NGÀY", 
+                    value=f"{mean_energy_use:,.2f} kWh"
+                )
+                col3.metric(
+                    label="HIỆU SUẤT NĂNG LƯỢNG TIÊU THỤ CAO NHẤT", 
+                    value=f"{daily_energy_use.max():.2f} kWh",
+                    delta=f"Ngày {daily_energy_use.idxmax().strftime('%d/%m')}"
+                )
+                # Hiển thị thông số tổng hợp nang lượng sản xuất
+                col1, col2, col3 = st.columns(3)
+                col1.metric(
+                    label="TỔNG NĂNG LƯỢNG SẢN XUẤT", 
+                    value=f"{total_energy_gen:,.2f} kWh",
+                    delta=f"{total_days_gen} ngày"
+                )
+                col2.metric(
+                    label="TRUNG BÌNH NĂNG LƯỢNG SẢN XUẤT THEO NGÀY", 
+                    value=f"{mean_energy_gen:,.2f} kWh"
+                )
+                col3.metric(
+                    label="HIỆU SUẤT NĂNG LƯỢNG SẢN XUẤT CAO NHẤT", 
+                    value=f"{daily_energy_gen.max():.2f} kWh",
+                    delta=f"Ngày {daily_energy_gen.idxmax().strftime('%d/%m')}"
+                )
+                
+                if not daily_energy_use.empty:
                     # Vẽ biểu đồ cột
                     fig = px.bar(
-                        daily_energy,
-                        x=daily_energy.index,
+                        daily_energy_use,
+                        x=daily_energy_use.index,
                         y='use [kW]',
                         title=f"TỔNG NĂNG LƯỢNG TIÊU THỤ<br>Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}",
                         labels={'use [kW]': 'Năng lượng (kWh)', 'index': 'Ngày'},
@@ -349,27 +397,7 @@ def trang_tong_quan(data):
                     
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Tính toán các chỉ số
-                    total_energy = daily_energy.sum()
-                    avg_energy = daily_energy.mean()
-                    total_days = len(daily_energy)
-                    
-                    # Hiển thị thông số tổng hợp
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric(
-                        label="TỔNG NĂNG LƯỢNG", 
-                        value=f"{total_energy:,.2f} kWh",
-                        delta=f"{total_days} ngày"
-                    )
-                    col2.metric(
-                        label="TRUNG BÌNH NGÀY", 
-                        value=f"{avg_energy:,.2f} kWh"
-                    )
-                    col3.metric(
-                        label="HIỆU SUẤT CAO NHẤT", 
-                        value=f"{daily_energy.max():.2f} kWh",
-                        delta=f"Ngày {daily_energy.idxmax().strftime('%d/%m')}"
-                    )
+
                     
                 else:
                     st.warning(f"Không có dữ liệu từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}")
