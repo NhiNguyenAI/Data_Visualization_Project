@@ -202,6 +202,7 @@ def trang_tong_quan(data):
                 options=valid_dates,
                 format_func=lambda x: x.strftime("%d/%m/%Y")
             )
+            st.markdown("") 
             # 
             hourly_data = hourly_energy[hourly_energy.index.date == selected_date]
 
@@ -212,14 +213,13 @@ def trang_tong_quan(data):
             max_value = hourly_data['use [kW]'].max()
             avg_value = hourly_data['use [kW]'].mean()
 
-            
             # Hiển thị các chỉ số dưới dạng columns
             cols = st.columns(3)
-            cols[0].metric("Tổng nanwng lượng tiêu thụ", f"{daily_total:.2f} kWh")
+            cols[0].metric("Tổng năng lượng tiêu thụ", f"{daily_total:.2f} kWh")
             cols[1].metric("Giờ cao điểm", max_hour.strftime('%H:%M'), f"{max_value:.2f} kWh")
             cols[2].metric("Trung bình/giờ", f"{avg_value:.2f} kWh")
          
-                
+            st.markdown("---")   
             # Tính toán lại hourly_data_gen cho ngày đã chọn
             hourly_data_gen = hourly_data_gen[hourly_data_gen.index.date == selected_date]
             # Tính toán các chỉ số
@@ -289,34 +289,98 @@ def trang_tong_quan(data):
 
         
         with tab2:
+          # Lấy phạm vi ngày có sẵn trong dữ liệu
             min_date = data.index.min().date()
             max_date = data.index.max().date()
+
+            # Tạo giao diện chọn ngày
             col1, col2 = st.columns(2)
             with col1:
-                start_date = st.date_input("Từ ngày", min_date, min_value=min_date, max_value=max_date)
+                start_date = st.date_input("Từ ngày", 
+                                        min_date, 
+                                        min_value=min_date, 
+                                        max_value=max_date,
+                                        key="start_date_selector")
             with col2:
-                end_date = st.date_input("Đến ngày", max_date, min_value=min_date, max_value=max_date)
-            if not daily_energy.empty:
-                fig2 = px.bar(
-                    daily_energy,
-                    x=daily_energy.index,
-                    y='use [kW]',
-                    title=f"Tổng năng lượng tiêu thụ từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}",
-                    labels={'use [kW]': 'Năng lượng (kWh)'}
-                )
-                st.plotly_chart(fig2, use_container_width=True)
+                end_date = st.date_input("Đến ngày", 
+                                    max_date, 
+                                    min_value=min_date, 
+                                    max_value=max_date,
+                                    key="end_date_selector")
+
+            # Kiểm tra hợp lệ ngày
+            if start_date > end_date:
+                st.error("Ngày kết thúc phải sau ngày bắt đầu!")
+                st.stop()
+
+            try:
+                # Lọc dữ liệu theo khoảng ngày đã chọn
+                date_mask = (data.index.date >= start_date) & (data.index.date <= end_date)
+                filtered_data = data.loc[date_mask]
                 
-                total = daily_energy['use [kW]'].sum()
-                avg = daily_energy['use [kW]'].mean()
+                # Tính toán năng lượng theo ngày
+                daily_energy = filtered_data['use [kW]'].resample('D').sum() / 60  # Chuyển từ kW sang kWh
                 
-                cols = st.columns(3)
-                cols[0].metric("Tổng năng lượng", f"{total:.2f} kWh")
-                cols[1].metric("Trung bình ngày", f"{avg:.2f} kWh")
-                cols[2].metric("Số ngày", len(daily_energy))
-            else:
-                st.warning("Không có dữ liệu trong khoảng thời gian này")
+                if not daily_energy.empty:
+                    # Vẽ biểu đồ cột
+                    fig = px.bar(
+                        daily_energy,
+                        x=daily_energy.index,
+                        y='use [kW]',
+                        title=f"TỔNG NĂNG LƯỢNG TIÊU THỤ<br>Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}",
+                        labels={'use [kW]': 'Năng lượng (kWh)', 'index': 'Ngày'},
+                        color_discrete_sequence=['#3498db']
+                    )
+                    
+                    # Tùy chỉnh biểu đồ
+                    fig.update_layout(
+                        xaxis_tickformat='%d/%m',
+                        hovermode="x unified",
+                        plot_bgcolor='white',
+                        height=450
+                    )
+                    
+                    # Hiển thị giá trị trên mỗi cột
+                    fig.update_traces(
+                        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>%{y:.2f} kWh",
+                        texttemplate='%{y:.1f}',
+                        textposition='outside'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Tính toán các chỉ số
+                    total_energy = daily_energy.sum()
+                    avg_energy = daily_energy.mean()
+                    total_days = len(daily_energy)
+                    
+                    # Hiển thị thông số tổng hợp
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric(
+                        label="TỔNG NĂNG LƯỢNG", 
+                        value=f"{total_energy:,.2f} kWh",
+                        delta=f"{total_days} ngày"
+                    )
+                    col2.metric(
+                        label="TRUNG BÌNH NGÀY", 
+                        value=f"{avg_energy:,.2f} kWh"
+                    )
+                    col3.metric(
+                        label="HIỆU SUẤT CAO NHẤT", 
+                        value=f"{daily_energy.max():.2f} kWh",
+                        delta=f"Ngày {daily_energy.idxmax().strftime('%d/%m')}"
+                    )
+                    
+                else:
+                    st.warning(f"Không có dữ liệu từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}")
+                    st.error(f"Lỗi khi xử lý dữ liệu: {str(e)}")
+            except Exception as e:
+                st.error(f"Có lỗi xảy ra: {str(e)}")
+                st.stop()
     except Exception as e:
-        st.error(f"Lỗi khi xử lý dữ liệu: {str(e)}")
+        st.error(f"Có lỗi xảy ra: {str(e)}")
+        st.stop()
+
 
 def trang_thiet_bi(df):
     """Trang phân tích theo thiết bị"""
@@ -529,7 +593,6 @@ def main():
         
         if df_xu_ly is not None:
             try:
-                st.metric("Tổng số bản ghi", f"{len(df_xu_ly):,}")
                 st.metric("Khoảng thời gian", 
                          f"{df_xu_ly['date'].min().strftime('%d/%m/%Y')} đến "
                          f"{df_xu_ly['date'].max().strftime('%d/%m/%Y')}")
@@ -539,7 +602,7 @@ def main():
             st.warning("Không có dữ liệu")
         
         st.markdown("---")
-        st.markdown("**Xuất dữ liệu**")
+
         
         if df_xu_ly is not None and st.button("Tạo mẫu dữ liệu"):
             try:
