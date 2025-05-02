@@ -78,6 +78,12 @@ def calculate_hourly(df, power_col='use [kW]'):
         return pd.DataFrame()
     # Tính tổng theo giờ và chuyển từ kW sang kWh (tích phân công suất)
     return df[[power_col]].resample('H').sum() / 60  # kW * 1h = kWh
+def calculate_hourly_for_gen(df, power_col='gen [kW]'):
+    """Tính tổng công suất theo từng giờ (kWh)"""
+    if power_col not in df.columns:
+        return pd.DataFrame()
+    # Tính tổng theo giờ và chuyển từ kW sang kWh (tích phân công suất)
+    return df[[power_col]].resample('H').sum() / 60  # kW * 1h = kWh
 
 @st.cache_data
 def xu_ly_du_lieu(_df):
@@ -168,15 +174,8 @@ def trang_tong_quan(data):
         st.write("Các cột số có sẵn:", data.columns.tolist())
         return
     
-    st.sidebar.header("Tùy chọn hiển thị")
-    min_date = data.index.min().date()
-    max_date = data.index.max().date()
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input("Từ ngày", min_date, min_value=min_date, max_value=max_date)
-    with col2:
-        end_date = st.date_input("Đến ngày", max_date, min_value=min_date, max_value=max_date)
+    start_date = data.index.min().date()
+    end_date = data.index.max().date()
     
     if start_date > end_date:
         st.error("Ngày kết thúc phải sau ngày bắt đầu!")
@@ -186,9 +185,10 @@ def trang_tong_quan(data):
         filtered = data.loc[f"{start_date}":f"{end_date}"]
         filtered = filtered.select_dtypes(include=['number'])
         daily_energy = calculate_daily(filtered)
-        hourly_energy = calculate_hourly(filtered)
+        hourly_energy = calculate_hourly(filtered)           
+        hourly_data_gen = calculate_hourly_for_gen(filtered)
         
-        tab1, tab2 = st.tabs(["BIỂU ĐỒ THEO GIỜ", "TỔNG HỢP THEO NGÀY"])
+        tab1, tab2 = st.tabs(["NĂNG LƯỢNG TIÊU THỤ VÀ SẢN XUẤT HẰNG NGÀY", "TỔNG HỢP NĂNG LƯỢNG TIÊU THỤ VÀ SẢN XUẤT THEO NGÀY"])
         
         with tab1:
             valid_dates = pd.Series(filtered.index.date).unique()
@@ -202,66 +202,100 @@ def trang_tong_quan(data):
                 options=valid_dates,
                 format_func=lambda x: x.strftime("%d/%m/%Y")
             )
-            
+            # 
             hourly_data = hourly_energy[hourly_energy.index.date == selected_date]
+
             
-            if not hourly_data.empty:
-                # Tạo biểu đồ đường với điểm đánh dấu
+            # Tính toán các chỉ số
+            daily_total = hourly_data['use [kW]'].sum()
+            max_hour = hourly_data['use [kW]'].idxmax()
+            max_value = hourly_data['use [kW]'].max()
+            avg_value = hourly_data['use [kW]'].mean()
+
+            
+            # Hiển thị các chỉ số dưới dạng columns
+            cols = st.columns(3)
+            cols[0].metric("Tổng nanwng lượng tiêu thụ", f"{daily_total:.2f} kWh")
+            cols[1].metric("Giờ cao điểm", max_hour.strftime('%H:%M'), f"{max_value:.2f} kWh")
+            cols[2].metric("Trung bình/giờ", f"{avg_value:.2f} kWh")
+         
+                
+            # Tính toán lại hourly_data_gen cho ngày đã chọn
+            hourly_data_gen = hourly_data_gen[hourly_data_gen.index.date == selected_date]
+            # Tính toán các chỉ số
+            daily_total_gen = hourly_data_gen['gen [kW]'].sum()
+            max_hour_gen = hourly_data_gen['gen [kW]'].idxmax()
+            max_value_gen = hourly_data_gen['gen [kW]'].max()
+            avg_value_gen = hourly_data_gen['gen [kW]'].mean()
+            
+            # Hiển thị các chỉ số dưới dạng columns
+            cols = st.columns(3)
+            cols[0].metric("Tổng năng lượng sản xuất", f"{daily_total_gen:.2f} kWh")
+            cols[1].metric("Giờ cao điểm", max_hour_gen.strftime('%H:%M'), f"{max_value_gen:.2f} kWh")
+            cols[2].metric("Trung bình/giờ", f"{avg_value_gen:.2f} kWh")
+            
+ 
+            # Hai biểu đồ này sẽ hiển thị năng lượng tiêu thụ và sản xuất theo giờ cho ngày đã chọn
+            if not hourly_data.empty and not hourly_data_gen.empty:
+                combined_data = hourly_data[['use [kW]']].join(hourly_data_gen[['gen [kW]']], how='outer').fillna(0)
+
                 fig = px.line(
-                    hourly_data,
-                    x=hourly_data.index,
-                    y='use [kW]',
-                    title=f"Năng lượng tiêu thụ theo giờ - Ngày {selected_date.strftime('%d/%m/%Y')}",
-                    labels={'use [kW]': 'Năng lượng (kWh)', 'datetime': 'Giờ'},
-                    markers=True,  # Thêm điểm đánh dấu tại mỗi giờ
-                    line_shape='linear'  # Dạng đường thẳng nối các điểm
+                    combined_data,
+                    x=combined_data.index,
+                    y=['use [kW]', 'gen [kW]'],
+                    title=f"Năng lượng tiêu thụ và sản xuất theo giờ - Ngày {selected_date.strftime('%d/%m/%Y')}",
+                    labels={'value': 'Năng lượng (kWh)', 'datetime': 'Giờ', 'variable': 'Loại năng lượng'},
+                    markers=True
                 )
-                
-                # Cấu hình thêm cho biểu đồ
-                fig.update_traces(
-                    line=dict(width=3, color='#3498db'),
-                    marker=dict(size=8, color='#e74c3c')
-                )
-                
+
+                fig.update_traces(line=dict(width=3), marker=dict(size=8))
+
                 fig.update_layout(
                     xaxis_tickformat='%H:%M',
                     hovermode="x unified",
-                    showlegend=False,
                     yaxis_title="Năng lượng (kWh)",
-                    xaxis_title="Thời gian"
+                    xaxis_title="Thời gian",
+                    legend_title_text='Loại năng lượng'
                 )
-                
-                # Thêm annotation cho giá trị cao nhất
-                max_idx = hourly_data['use [kW]'].idxmax()
-                max_val = hourly_data['use [kW]'].max()
+
+                max_use_idx = combined_data['use [kW]'].idxmax()
+                max_use_val = combined_data['use [kW]'].max()
                 fig.add_annotation(
-                    x=max_idx,
-                    y=max_val,
-                    text=f"Max: {max_val:.2f} kWh",
+                    x=max_use_idx,
+                    y=max_use_val,
+                    text=f"Max tiêu thụ: {max_use_val:.2f} kWh",
                     showarrow=True,
                     arrowhead=1,
                     ax=0,
                     ay=-40
                 )
-                
+
+                max_gen_idx = combined_data['gen [kW]'].idxmax()
+                max_gen_val = combined_data['gen [kW]'].max()
+                fig.add_annotation(
+                    x=max_gen_idx,
+                    y=max_gen_val,
+                    text=f"Max sản xuất: {max_gen_val:.2f} kWh",
+                    showarrow=True,
+                    arrowhead=1,
+                    ax=0,
+                    ay=-40
+                )
+
                 st.plotly_chart(fig, use_container_width=True)
-                
-                # Tính toán các chỉ số
-                daily_total = hourly_data['use [kW]'].sum()
-                max_hour = hourly_data['use [kW]'].idxmax()
-                max_value = hourly_data['use [kW]'].max()
-                avg_value = hourly_data['use [kW]'].mean()
-                
-                # Hiển thị các chỉ số dưới dạng columns
-                cols = st.columns(3)
-                cols[0].metric("Tổng tiêu thụ", f"{daily_total:.2f} kWh")
-                cols[1].metric("Giờ cao điểm", max_hour.strftime('%H:%M'), f"{max_value:.2f} kWh")
-                cols[2].metric("Trung bình/giờ", f"{avg_value:.2f} kWh")
-                
+
             else:
                 st.warning("Không có dữ liệu cho ngày được chọn")
+
         
         with tab2:
+            min_date = data.index.min().date()
+            max_date = data.index.max().date()
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Từ ngày", min_date, min_value=min_date, max_value=max_date)
+            with col2:
+                end_date = st.date_input("Đến ngày", max_date, min_value=min_date, max_value=max_date)
             if not daily_energy.empty:
                 fig2 = px.bar(
                     daily_energy,
