@@ -138,6 +138,27 @@ def calculate_hourly_for_gen(df, power_col='gen [kW]'):
     # Sum by hour and convert from kW to kWh (power integral)
     return df[[power_col]].resample('H').sum() / 60  # kW * 1h = kWh
 
+def calculate_daily_for_device(df, device_col):
+    """
+    Calculate daily energy consumption for a specific device.
+    
+    Args:
+        df (pd.DataFrame): Input dataframe with datetime index
+        device_col (str): Column name for the device power usage
+        
+    Returns:
+        pd.DataFrame: Daily energy consumption in kWh for the device
+    """
+    if device_col not in df.columns:
+        return pd.DataFrame()
+    
+    # Ensure we only calculate on numeric columns
+    if not np.issubdtype(df[device_col].dtype, np.number):
+        return pd.DataFrame()
+    
+    # Resample to daily sum and convert from kW to kWh
+    return df[[device_col]].resample('D').sum() / 60
+
 @st.cache_data
 def process_data(_df):
     """
@@ -272,8 +293,9 @@ def overview_page(data):
         hourly_data_gen = calculate_hourly_for_gen(filtered)
         
         tab1, tab2 = st.tabs(["DAILY ENERGY CONSUMPTION & GENERATION", "ENERGY SUMMARY BY DAY"])
-        
+
         with tab1:
+            st.markdown("") 
             valid_dates = pd.Series(filtered.index.date).unique()
             
             if len(valid_dates) == 0:
@@ -301,7 +323,7 @@ def overview_page(data):
             cols[1].metric("Peak Hour", max_hour.strftime('%H:%M'), f"{max_value:.2f} kWh")
             cols[2].metric("Hourly Average", f"{avg_value:.2f} kWh")
          
-            st.markdown("---")   
+            st.markdown("")   
             
             # Calculate generation metrics
             hourly_data_gen = hourly_data_gen[hourly_data_gen.index.date == selected_date]
@@ -369,6 +391,7 @@ def overview_page(data):
                 st.warning("No data available for selected date")
 
         with tab2:
+            st.markdown("") 
             # Get available date range
             min_date = data.index.min().date()
             max_date = data.index.max().date()
@@ -392,6 +415,7 @@ def overview_page(data):
             if start_date > end_date:
                 st.error("End date must be after start date!")
                 st.stop()
+            st.markdown("")
 
             try:
                 # Filter data by selected date range
@@ -414,34 +438,35 @@ def overview_page(data):
                 col1, col2, col3 = st.columns(3)
                 col1.metric(
                     label="TOTAL CONSUMPTION", 
-                    value=f"{total_energy_use:,.2f} kWh",
-                    delta=f"{total_days_use} days"
+                    value=f"{total_energy_use:,.2f} kWh"
                 )
                 col2.metric(
-                    label="DAILY AVERAGE CONSUMPTION", 
-                    value=f"{mean_energy_use:,.2f} kWh"
-                )
-                col3.metric(
                     label="PEAK CONSUMPTION DAY", 
                     value=f"{daily_energy_use.max():.2f} kWh",
                     delta=f"Date {daily_energy_use.idxmax().strftime('%d/%m')}"
                 )
+                col3.metric(
+                    label="DAILY AVERAGE CONSUMPTION", 
+                    value=f"{mean_energy_use:,.2f} kWh"
+                )
+
+
+                st.markdown("")
                 
                 # Display generation metrics
                 col1, col2, col3 = st.columns(3)
                 col1.metric(
                     label="TOTAL GENERATION", 
                     value=f"{total_energy_gen:,.2f} kWh",
-                    delta=f"{total_days_gen} days"
                 )
                 col2.metric(
-                    label="DAILY AVERAGE GENERATION", 
-                    value=f"{mean_energy_gen:,.2f} kWh"
-                )
-                col3.metric(
                     label="PEAK GENERATION DAY", 
                     value=f"{daily_energy_gen.max():.2f} kWh",
                     delta=f"Date {daily_energy_gen.idxmax().strftime('%d/%m')}"
+                )
+                col3.metric(
+                    label="DAILY AVERAGE GENERATION", 
+                    value=f"{mean_energy_gen:,.2f} kWh"
                 )
 
                 # Combine consumption and generation data
@@ -532,9 +557,6 @@ def overview_page(data):
 def devices_page(df):
     """
     Page showing energy consumption analysis by device.
-    
-    Args:
-        df (pd.DataFrame): Processed energy data
     """
     st.header("🔌 Device Analysis")
     
@@ -542,90 +564,266 @@ def devices_page(df):
         st.warning("No data available")
         return
         
-    date_range = date_filter(df, "devices")
-    filtered_df = df[(df['date'] >= date_range[0]) & (df['date'] <= date_range[1])]
-    
-    selected_devices = st.multiselect(
-        "Select devices to analyze",
-        DEVICES,
-        default=DEVICES[:3]
-    )
-    
-    if not selected_devices:
-        st.warning("Please select at least one device")
-        return
-    
-    st.markdown("---")
-    
-    try:
-        device_totals = filtered_df[selected_devices].sum().sort_values(ascending=False)
-        cols = st.columns(len(selected_devices))
-        for i, (device, total) in enumerate(device_totals.items()):
-            with cols[i]:
-                st.metric(
-                    device.replace(" [kW]", ""),
-                    f"{total:,.0f} kW",
-                    help=f"Total consumption for {device}"
-                )
-    except Exception as e:
-        st.error(f"Error calculating device totals: {str(e)}")
-    
     tab1, tab2, tab3 = st.tabs(["📊 Distribution", "⏱ Trends", "🔗 Correlations"])
     
     with tab1:
+        # Get available date range
+        min_date = df.index.min().date()
+        max_date = df.index.max().date()
+
+        # Create date selection UI
         col1, col2 = st.columns(2)
         with col1:
-            try:
-                fig = px.pie(
-                    device_totals,
-                    values=device_totals.values,
-                    names=device_totals.index.str.replace(" [kW]", ""),
-                    title='Device Consumption Distribution'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"Pie chart error: {str(e)}")
-        
+            start_date = st.date_input("From date", 
+                                     min_date, 
+                                     min_value=min_date, 
+                                     max_value=max_date,
+                                     key="device_start_date")
         with col2:
-            try:
-                fig = px.bar(
-                    device_totals.reset_index(),
-                    x='index',
-                    y=0,
-                    title='Total Consumption by Device',
-                    labels={'index': 'Device', '0': 'Energy (kW)'}
+            end_date = st.date_input("To date", 
+                                   max_date, 
+                                   min_value=min_date, 
+                                   max_value=max_date,
+                                   key="device_end_date")
+
+        # Validate date range
+        if start_date > end_date:
+            st.error("End date must be after start date!")
+            st.stop()
+        st.markdown("")
+
+        try:
+            # Filter data by selected date range
+            date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+            filtered_data = df.loc[date_mask]
+            
+            # Device selection
+            selected_device = st.selectbox(
+                "Select a device to analyze",
+                DEVICES,
+                index=0,
+                key="device_select"
+            )
+            
+            if not selected_device or selected_device not in filtered_data.columns:
+                st.warning("Please select a valid device")
+                return
+            
+            # Calculate daily consumption
+            daily_consumption = filtered_data[[selected_device]].resample('D').sum() / 60  # Convert kW to kWh
+            
+            if daily_consumption.empty:
+                st.warning(f"No data available for {selected_device} in selected period")
+                return
+                
+            # Display metrics in columns
+            cols = st.columns(3)
+            cols[0].metric(
+                "Total Consumption", 
+                f"{daily_consumption[selected_device].sum():,.2f} kWh"
+            )
+            cols[1].metric(
+                "Peak Consumption Day", 
+                f"{daily_consumption[selected_device].max():,.2f} kWh",
+                delta=f"Date {daily_consumption[selected_device].idxmax().strftime('%d/%m')}"
+            )
+            cols[2].metric(
+                "Daily Average", 
+                f"{daily_consumption[selected_device].mean():,.2f} kWh"
+            )
+
+            
+           # Plot device consumption with peak annotations
+            if not daily_consumption.empty:
+                fig = px.line(
+                    daily_consumption.reset_index(),
+                    x='datetime',
+                    y=selected_device,
+                    title=f"{selected_device.replace(' [kW]', '')} Daily Consumption",
+                    labels={
+                        'datetime': 'Date',
+                        selected_device: 'Consumption (kWh)'
+                    },
+                    markers=True
                 )
+
+                fig.update_traces(
+                    line=dict(width=3, color='#1f77b4'),
+                    marker=dict(size=8, color='#1f77b4')
+                )
+
+                fig.update_layout(
+                    xaxis_tickformat='%d/%m',
+                    hovermode="x unified",
+                    yaxis_title="Consumption (kWh)",
+                    xaxis_title="Date",
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    height=500
+                )
+
+                # Add annotations for peak values
+                max_consump_idx = daily_consumption[selected_device].idxmax()
+                max_consump_val = daily_consumption[selected_device].max()
+                
+                fig.add_annotation(
+                    x=max_consump_idx,
+                    y=max_consump_val,
+                    text=f"Peak: {max_consump_val:.2f} kWh",
+                    showarrow=True,
+                    arrowhead=1,
+                    ax=0,
+                    ay=-40,
+                    bgcolor="white"
+                )
+
+                # Add annotation for minimum value if you want
+                min_consump_idx = daily_consumption[selected_device].idxmin()
+                min_consump_val = daily_consumption[selected_device].min()
+                
+                fig.add_annotation(
+                    x=min_consump_idx,
+                    y=min_consump_val,
+                    text=f"Min: {min_consump_val:.2f} kWh",
+                    showarrow=True,
+                    arrowhead=1,
+                    ax=0,
+                    ay=40,
+                    bgcolor="white"
+                )
+
                 st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"Bar chart error: {str(e)}")
-    
+            
+        except Exception as e:
+            st.error(f"Error displaying device data: {str(e)}")
     with tab2:
+        # Get date range from data
+        min_date = df.index.min().date()
+        max_date = df.index.max().date()
+
+        # Create date selection UI
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("From date", 
+                                    min_date, 
+                                    min_value=min_date, 
+                                    max_value=max_date,
+                                    key="devices_tab2_start")
+        with col2:
+            end_date = st.date_input("To date", 
+                                max_date, 
+                                min_value=min_date, 
+                                max_value=max_date,
+                                key="devices_tab2_end")
+
+        # Validate date range
+        if start_date > end_date:
+            st.error("End date must be after start date!")
+            st.stop()
+        
+        # Filter data by selected date range
+        date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+        filtered_df = df.loc[date_mask]
+        
+        # Device selection
+        selected_devices = st.multiselect(
+            "Select devices to analyze (or leave empty for all devices)",
+            DEVICES,
+            default=[],
+            key="devices_tab2_select"
+        )
+        
+        # Use all devices if none selected
+        devices_to_analyze = selected_devices if selected_devices else DEVICES
+        
         try:
-            fig = px.line(
-                filtered_df.set_index('datetime')[selected_devices].resample('D').mean().reset_index(),
-                x='datetime',
-                y=selected_devices,
-                title='Daily Usage Trends',
-                labels={'value': 'Power (kW)', 'datetime': 'Date'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            # Calculate total consumption for each device
+            device_totals = filtered_df[devices_to_analyze].sum().sort_values(ascending=False)
+            
+            # Calculate percentage of total consumption
+            total_consumption = device_totals.sum()
+            device_percentages = (device_totals / total_consumption * 100).round(1)
+            
+            # Get top 5 devices and group the rest into "Other"
+            top_devices = device_percentages.head(5)
+            other_devices = device_percentages[5:]
+            
+            if len(other_devices) > 0:
+                other_percentage = other_devices.sum()
+                top_devices['Other'] = other_percentage
+            
+            # Prepare data for visualization
+            pie_data = top_devices.reset_index()
+            pie_data.columns = ['Device', 'Percentage']
+            pie_data['Device'] = pie_data['Device'].str.replace(" [kW]", "")
+            
+            # Display metrics in columns - top 5 devices
+            st.subheader("Top 5 Energy-Consuming Devices")
+            cols = st.columns(5)
+            for i in range(min(5, len(device_totals))):
+                device = device_totals.index[i]
+                with cols[i]:
+                    st.metric(
+                        label=device.replace(" [kW]", ""),
+                        value=f"{device_totals.iloc[i]:,.0f} kW",
+                        delta=f"{device_percentages.iloc[i]:.1f}% of total"
+                    )
+            
+            # Create two-column layout for charts
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Pie chart showing consumption distribution
+                fig_pie = px.pie(
+                    pie_data,
+                    values='Percentage',
+                    names='Device',
+                    title='Energy Consumption Distribution (Top 5 + Other)',
+                    hover_data=['Percentage'],
+                    labels={'Percentage': '% of total'},
+                    color_discrete_sequence=px.colors.sequential.RdBu
+                )
+                fig_pie.update_traces(
+                    textposition='inside',
+                    textinfo='percent+label',
+                    hovertemplate="<b>%{label}</b><br>%{percent:.1%}<br>%{value:.1f}%",
+                    marker=dict(line=dict(color='#FFFFFF', width=1))
+                )
+                fig_pie.update_layout(
+                    uniformtext_minsize=10,
+                    uniformtext_mode='hide',
+                    showlegend=False,
+                    margin=dict(t=50, b=50)
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+            
+            with col2:
+                # Bar chart showing absolute consumption for all devices
+                devive_totals_top_5 = device_totals.head(5).reset_index()
+                devive_totals_top_5.columns = ['Device', 'Consumption']
+                devive_totals_top_5['Device'] = devive_totals_top_5['Device'].str.replace(" [kW]", "")
+                
+                fig_bar = px.bar(
+                    devive_totals_top_5,
+                    x='Device',
+                    y='Consumption',
+                    title='Detailed Consumption by Device',
+                    labels={'Consumption': 'Energy (kW)'},
+                    color='Consumption',
+                    color_continuous_scale='RdBu'
+                )
+                fig_bar.update_traces(
+                    hovertemplate="<b>%{x}</b><br>%{y:,.0f} kW"
+                )
+                fig_bar.update_layout(
+                    xaxis_title="Device",
+                    yaxis_title="Total Consumption (kW)",
+                    xaxis={'categoryorder':'total descending'},
+                    coloraxis_showscale=False
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+                
         except Exception as e:
-            st.error(f"Trend display error: {str(e)}")
-    
-    with tab3:
-        try:
-            fig = px.imshow(
-                filtered_df[selected_devices].corr(),
-                text_auto=True,
-                aspect="auto",
-                title='Device Usage Correlations',
-                color_continuous_scale='RdBu',
-                zmin=-1,
-                zmax=1
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.error(f"Correlation matrix error: {str(e)}")
+            st.error(f"Error processing device data: {str(e)}")
 
 def weather_page(df):
     """
