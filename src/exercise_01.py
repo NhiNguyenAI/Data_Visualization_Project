@@ -9,6 +9,8 @@ import numpy as np
 df = pd.read_csv("data/HomeC.csv")
 df.info()
 
+# Idee
+# User Categorical for Use Energie of the the devices to find out the most used devices
 # Constants
 DEVICE_COLUMNS = [
     'Dishwasher [kW]', 'Furnace 1 [kW]', 'Furnace 2 [kW]',

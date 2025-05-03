@@ -295,7 +295,7 @@ def trang_tong_quan(data):
 
         
         with tab2:
-          # Lấy phạm vi ngày có sẵn trong dữ liệu
+            # Lấy phạm vi ngày có sẵn trong dữ liệu
             min_date = data.index.min().date()
             max_date = data.index.max().date()
 
@@ -309,10 +309,10 @@ def trang_tong_quan(data):
                                         key="start_date_selector")
             with col2:
                 end_date = st.date_input("Đến ngày", 
-                                    max_date, 
-                                    min_value=min_date, 
-                                    max_value=max_date,
-                                    key="end_date_selector")
+                                        max_date, 
+                                        min_value=min_date, 
+                                        max_value=max_date,
+                                        key="end_date_selector")
 
             # Kiểm tra hợp lệ ngày
             if start_date > end_date:
@@ -336,7 +336,7 @@ def trang_tong_quan(data):
                 total_days_use = len(daily_energy_use)
                 total_days_gen = len(daily_energy_gen)
                 
-                # Hiển thị thông số tổng hợp nang lượng tiêu thụ
+                # Hiển thị thông số tổng hợp năng lượng tiêu thụ
                 col1, col2, col3 = st.columns(3)
                 col1.metric(
                     label="TỔNG NĂNG LƯỢNG TIÊU THỤ", 
@@ -352,7 +352,8 @@ def trang_tong_quan(data):
                     value=f"{daily_energy_use.max():.2f} kWh",
                     delta=f"Ngày {daily_energy_use.idxmax().strftime('%d/%m')}"
                 )
-                # Hiển thị thông số tổng hợp nang lượng sản xuất
+                
+                # Hiển thị thông số tổng hợp năng lượng sản xuất
                 col1, col2, col3 = st.columns(3)
                 col1.metric(
                     label="TỔNG NĂNG LƯỢNG SẢN XUẤT", 
@@ -368,43 +369,90 @@ def trang_tong_quan(data):
                     value=f"{daily_energy_gen.max():.2f} kWh",
                     delta=f"Ngày {daily_energy_gen.idxmax().strftime('%d/%m')}"
                 )
-                
-                if not daily_energy_use.empty:
-                    # Vẽ biểu đồ cột
-                    fig = px.bar(
-                        daily_energy_use,
-                        x=daily_energy_use.index,
-                        y='use [kW]',
-                        title=f"TỔNG NĂNG LƯỢNG TIÊU THỤ<br>Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}",
-                        labels={'use [kW]': 'Năng lượng (kWh)', 'index': 'Ngày'},
-                        color_discrete_sequence=['#3498db']
-                    )
-                    
-                    # Tùy chỉnh biểu đồ
-                    fig.update_layout(
-                        xaxis_tickformat='%d/%m',
-                        hovermode="x unified",
-                        plot_bgcolor='white',
-                        height=450
-                    )
-                    
-                    # Hiển thị giá trị trên mỗi cột
-                    fig.update_traces(
-                        hovertemplate="<b>%{x|%d/%m/%Y}</b><br>%{y:.2f} kWh",
-                        texttemplate='%{y:.1f}',
-                        textposition='outside'
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
 
-                    
-                else:
-                    st.warning(f"Không có dữ liệu từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}")
-                    st.error(f"Lỗi khi xử lý dữ liệu: {str(e)}")
+                # Kết hợp dữ liệu tiêu thụ và sản xuất năng lượng vào cùng một DataFrame
+                combined_data = pd.DataFrame({
+                    'use [kW]': daily_energy_use,
+                    'gen [kW]': daily_energy_gen
+                }).fillna(0)
+
+                # Vẽ biểu đồ cột kết hợp với các cột gần nhau
+                fig = px.bar(
+                    combined_data,
+                    x=combined_data.index,
+                    y=['use [kW]', 'gen [kW]'],
+                    title=f"TỔNG NĂNG LƯỢNG TIÊU THỤ VÀ SẢN XUẤT<br>Từ {start_date.strftime('%d/%m/%Y')} đến {end_date.strftime('%d/%m/%Y')}",
+                    labels={'value': 'kWh', 'datetime': 'Ngày'},
+                    color_discrete_sequence=['#3498db', '#e74c3c']  # Màu cho cột tiêu thụ và sản xuất
+                )
+
+                # Tùy chỉnh biểu đồ
+                fig.update_layout(
+                    xaxis_tickformat='%d/%m',
+                    hovermode="x unified",
+                    plot_bgcolor='white',
+                    height=450,
+                    barmode='group'  # Các cột đứng cạnh nhau thay vì chồng lên nhau
+                )
+
+                # Hiển thị giá trị trên mỗi cột
+                fig.update_traces(
+                    hovertemplate="<b>%{x|%d/%m/%Y}</b><br>%{y:.2f} kWh",
+                    texttemplate='%{y:.1f}',
+                    textposition='outside'
+                )
+
+                # Hiển thị biểu đồ
+                st.plotly_chart(fig, use_container_width=True)
             except Exception as e:
                 st.error(f"Có lỗi xảy ra: {str(e)}")
                 st.stop()
+                
+            # Thêm bảng dữ liệu chi tiết và biểu đồ đường cho use[kw] - gen[kw]
+            
+            st.subheader("CHÊNH LỆCH NĂNG LƯỢNG (TIÊU THỤ - SẢN XUẤT)")
+
+            try:
+                # Tính toán chênh lệch theo ngày
+                daily_data = filtered_data[['use [kW]', 'gen [kW]']].resample('D').sum() / 60  # Chuyển sang kWh
+                daily_data['Net [kWh]'] = daily_data['use [kW]'] - daily_data['gen [kW]']
+                
+                # Tạo biểu đồ đường cho chênh lệch
+                fig = px.line(
+                    daily_data,
+                    x=daily_data.index,
+                    y='Net [kWh]',
+                    title='BIỂU ĐỒ CHÊNH LỆCH NĂNG LƯỢNG THEO NGÀY',
+                    labels={
+                        'Net [kWh]': 'kWh',
+                        'datetime': 'Ngày'
+                    },
+                    color_discrete_sequence=['#3498db'],  # Màu xanh dương
+                    markers=True
+                )
+                
+                # Tùy chỉnh biểu đồ
+                fig.update_layout(
+                    xaxis_title="Ngày",
+                    yaxis_title="kWh",
+                    hovermode="x unified",
+                    height=500,
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    xaxis=dict(
+                        showgrid=True,
+                        gridcolor='lightgray',
+                        tickformat='%d/%m'
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor='lightgray'
+                    )
+                )
+                
+                st.plotly_chart(fig)
+                
+            except Exception as e:
+                st.error(f"Lỗi khi xử lý dữ liệu: {str(e)}") 
     except Exception as e:
         st.error(f"Có lỗi xảy ra: {str(e)}")
         st.stop()
