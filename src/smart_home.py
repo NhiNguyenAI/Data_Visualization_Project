@@ -202,7 +202,7 @@ def process_data(_df):
 # ====================== UI COMPONENTS ======================
 def date_filter(df, key):
     """
-    Display a date range filter widget.
+    Display a date range filter widget with calendar.
     
     Args:
         df (pd.DataFrame): Dataframe containing date column
@@ -221,7 +221,9 @@ def date_filter(df, key):
             [min_date, max_date],
             key=key,
             min_value=min_date,
-            max_value=max_date
+            max_value=max_date,
+            format="DD/MM/YYYY",
+            help="Click to open calendar picker"
         )
     except Exception as e:
         st.error(f"Filter display error: {str(e)}")
@@ -302,10 +304,13 @@ def overview_page(data):
                 st.warning("No data available for selected period")
                 return
                 
-            selected_date = st.selectbox(
+            selected_date = st.date_input(
                 "Select date to view details",
-                options=valid_dates,
-                format_func=lambda x: x.strftime("%d/%m/%Y")
+                valid_dates[0],
+                min_value=valid_dates.min(),
+                max_value=valid_dates.max(),
+                format="DD/MM/YYYY",
+                key="daily_detail_date"
             )
             st.markdown("") 
             
@@ -396,20 +401,26 @@ def overview_page(data):
             min_date = data.index.min().date()
             max_date = data.index.max().date()
 
-            # Create date selection UI
+            # Create date selection UI with calendar
             col1, col2 = st.columns(2)
             with col1:
-                start_date = st.date_input("From date", 
-                                        min_date, 
-                                        min_value=min_date, 
-                                        max_value=max_date,
-                                        key="start_date_selector")
+                start_date = st.date_input(
+                    "From date", 
+                    min_date, 
+                    min_value=min_date, 
+                    max_value=max_date,
+                    key="start_date_selector_calendar",
+                    format="DD/MM/YYYY"
+                )
             with col2:
-                end_date = st.date_input("To date", 
-                                        max_date, 
-                                        min_value=min_date, 
-                                        max_value=max_date,
-                                        key="end_date_selector")
+                end_date = st.date_input(
+                    "To date", 
+                    max_date, 
+                    min_value=min_date, 
+                    max_value=max_date,
+                    key="end_date_selector_calendar",
+                    format="DD/MM/YYYY"
+                )
 
             # Validate date range
             if start_date > end_date:
@@ -449,7 +460,6 @@ def overview_page(data):
                     label="DAILY AVERAGE CONSUMPTION", 
                     value=f"{mean_energy_use:,.2f} kWh"
                 )
-
 
                 st.markdown("")
                 
@@ -571,20 +581,26 @@ def devices_page(df):
         min_date = df.index.min().date()
         max_date = df.index.max().date()
 
-        # Create date selection UI
+        # Create date selection UI with calendar
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("From date", 
-                                     min_date, 
-                                     min_value=min_date, 
-                                     max_value=max_date,
-                                     key="device_start_date")
+            start_date = st.date_input(
+                "From date", 
+                min_date, 
+                min_value=min_date, 
+                max_value=max_date,
+                key="device_start_date_calendar",
+                format="DD/MM/YYYY"
+            )
         with col2:
-            end_date = st.date_input("To date", 
-                                   max_date, 
-                                   min_value=min_date, 
-                                   max_value=max_date,
-                                   key="device_end_date")
+            end_date = st.date_input(
+                "To date", 
+                max_date, 
+                min_value=min_date, 
+                max_value=max_date,
+                key="device_end_date_calendar",
+                format="DD/MM/YYYY"
+            )
 
         # Validate date range
         if start_date > end_date:
@@ -700,20 +716,26 @@ def devices_page(df):
         min_date = df.index.min().date()
         max_date = df.index.max().date()
 
-        # Create date selection UI
+        # Create date selection UI with calendar
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("From date", 
-                                    min_date, 
-                                    min_value=min_date, 
-                                    max_value=max_date,
-                                    key="devices_tab2_start")
+            start_date = st.date_input(
+                "From date", 
+                min_date, 
+                min_value=min_date, 
+                max_value=max_date,
+                key="devices_tab2_start",
+                format="DD/MM/YYYY"
+            )
         with col2:
-            end_date = st.date_input("To date", 
-                                max_date, 
-                                min_value=min_date, 
-                                max_value=max_date,
-                                key="devices_tab2_end")
+            end_date = st.date_input(
+                "To date", 
+                max_date, 
+                min_value=min_date, 
+                max_value=max_date,
+                key="devices_tab2_end",
+                format="DD/MM/YYYY"
+            )
 
         # Validate date range
         if start_date > end_date:
@@ -839,6 +861,10 @@ def weather_page(df):
         return
         
     date_range = date_filter(df, "weather")
+    if date_range is None or len(date_range) < 2:
+        st.error("Invalid date range selected")
+        return
+        
     filtered_df = df[(df['date'] >= date_range[0]) & (df['date'] <= date_range[1])]
     
     cols = st.columns(4)
