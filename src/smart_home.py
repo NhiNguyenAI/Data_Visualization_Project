@@ -304,7 +304,16 @@ def overview_page(data):
         labels=dict(x="Hour of Day", y="Date", color="Energy Usage (kW)"),
         x=heatmap_pivot.columns,
         y=heatmap_pivot.index.get_level_values('day_month'),  # Use formatted dates for display
-        color_continuous_scale='thermal',
+        color_continuous_scale=[
+        "#fff7bc",  
+        "#fee391",
+        "#fec44f",
+        "#fe9929",
+        "#ec7014",
+        "#cc4c02",
+        "#993404",
+        "#662506"   
+        ],
         aspect="auto",
         height=600 + (len(heatmap_pivot) * 3)
     )
@@ -320,8 +329,8 @@ def overview_page(data):
             'font': {'size': 18}
         },
         xaxis_title="<b>Hour of Day</b>",
-        yaxis_title="<b>Date (DD/MM)</b>",
-        margin=dict(l=100, r=50, b=100, t=100),
+        yaxis_title="<b>Date</b>",
+        margin=dict(l=50, r=50, b=100, t=100),
         plot_bgcolor='rgba(0,0,0,0)',
         paper_bgcolor='rgba(0,0,0,0)',
         font=dict(family="Arial", size=12)
