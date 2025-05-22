@@ -928,104 +928,244 @@ def devices_page(df):
 
 def weather_page(df):
     """
-    Page showing weather impact on energy consumption.
+    Enhanced page showing weather impact on energy consumption with more insights.
     
     Args:
         df (pd.DataFrame): Processed energy data with weather info
     """
-    st.header("🌤️ Weather Impact")
+    st.header("🌤 Weather Impact Analysis")
     
     if df is None:
         st.warning("No data available")
         return
-        
+    
+    # Ensure 'date' column exists
+    if 'date' not in df.columns:
+        st.error("Dataframe is missing 'date' column")
+        return
+    
+    # Date filtering
     date_range = date_filter(df, "weather")
     if date_range is None or len(date_range) < 2:
         st.error("Invalid date range selected")
         return
         
-    filtered_df = df[(df['date'] >= date_range[0]) & (df['date'] <= date_range[1])]
+    filtered_df = df[(df['date'] >= date_range[0]) & (df['date'] <= date_range[1])].copy()
+    filtered_df['date'] = pd.to_datetime(filtered_df['date'])
     
-    cols = st.columns(4)
+    # Separate numeric and non-numeric columns
+    numeric_cols = filtered_df.select_dtypes(include=['number']).columns.tolist()
+    non_numeric_cols = [col for col in filtered_df.columns if col not in numeric_cols and col != 'date']
+    
+    # Create hourly aggregates - handle numeric and non-numeric separately
+    if len(numeric_cols) > 0:
+        # Resample numeric columns with mean
+        hourly_numeric = filtered_df.set_index('date')[numeric_cols].resample('H').mean()
+        
+        # Resample non-numeric columns with first observation if they exist
+        if non_numeric_cols:
+            hourly_non_numeric = filtered_df.set_index('date')[non_numeric_cols].resample('H').first()
+            hourly_df = pd.concat([hourly_numeric, hourly_non_numeric], axis=1)
+        else:
+            hourly_df = hourly_numeric
+        
+        hourly_df = hourly_df.reset_index()
+    else:
+        hourly_df = filtered_df.copy()
+    
+    # Weather summary metrics
+    st.subheader("Weather Summary")
+    cols = st.columns(5)
     weather_metrics = [
-        ('temperature', '🌡️ Avg Temp', '°C'),
-        ('humidity', '💧 Avg Humidity', '%'),
-        ('windSpeed', '🌬️ Avg Wind Speed', ' km/h'),
-        ('pressure', '⏲️ Avg Pressure', ' hPa')
+        ('temperature', '🌡 Avg Temp', '°C'),
+        ('apparentTemperature', '🌡 Feels Like', '°C'),
+        ('humidity', '💧 Humidity', '%'),
+        ('windSpeed', '🌬 Wind Speed', 'km/h'),
+        ('pressure', '⏲ Pressure', 'hPa')
     ]
     
-    for i, (col, name, unit) in enumerate(weather_metrics):
+    # Filter to only include valid numeric metrics
+    valid_metrics = [(col, name, unit) for col, name, unit in weather_metrics 
+                    if col in filtered_df.columns and pd.api.types.is_numeric_dtype(filtered_df[col])]
+    
+    for i, (col, name, unit) in enumerate(valid_metrics):
         with cols[i]:
             try:
                 avg_value = filtered_df[col].mean()
-                st.metric(name, f"{avg_value:.1f}{unit}")
+                delta = f"{filtered_df[col].max() - filtered_df[col].min():.1f}{unit} range"
+                st.metric(name, f"{avg_value:.1f}{unit}", delta)
             except Exception as e:
                 st.error(f"Error calculating {name}: {str(e)}")
     
     st.markdown("---")
     
-    tab1, tab2 = st.tabs(["🌦 Trends", "⚡ Relationships"])
+    # Main tabs
+    tab1, tab2, tab3 = st.tabs(["📈 Weather Trends", "🔍 Energy Relationships", "🌦 Weather Conditions"])
     
     with tab1:
-        col1, col2 = st.columns(2)
-        with col1:
-            try:
-                fig = px.line(
-                    filtered_df.set_index('datetime')[['temperature', 'apparentTemperature']].resample('D').mean().reset_index(),
-                    x='datetime',
-                    y=['temperature', 'apparentTemperature'],
-                    title='Temperature Trends',
-                    labels={'value': 'Temperature (°C)', 'datetime': 'Date'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"Temperature chart error: {str(e)}")
-        
-        with col2:
-            try:
-                fig = px.line(
-                    filtered_df.set_index('datetime')[['humidity', 'dewPoint']].resample('D').mean().reset_index(),
-                    x='datetime',
-                    y=['humidity', 'dewPoint'],
-                    title='Humidity & Dew Point',
-                    labels={'value': 'Value', 'datetime': 'Date'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"Humidity chart error: {str(e)}")
+            col1, col2 = st.columns(2)
+            with col1:
+                # Get only numeric columns that exist in the dataframe
+                available_numeric_cols = filtered_df.select_dtypes(include=['number']).columns.tolist()
+                temp_cols = [c for c in ['temperature', 'apparentTemperature', 'dewPoint'] 
+                            if c in available_numeric_cols]
+                
+                if temp_cols:
+                    hourly = filtered_df.groupby('hour')[temp_cols].mean().reset_index()
+                    fig = px.bar(
+                        hourly.melt(id_vars='hour'), 
+                        x='hour', 
+                        y='value',
+                        color='variable',
+                        barmode='group',
+                        title='Hourly Temperature Averages',
+                        labels={'hour': 'Hour of Day', 'value': 'Temperature (°C)'},
+                        color_discrete_map={
+                            'temperature': '#EF553B',
+                            'apparentTemperature': '#AB63FA',
+                            'dewPoint': '#00CC96'
+                        }
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No numeric temperature data available for plotting")
+                    st.write("Available numeric columns:", available_numeric_cols)
+            
+            with col2:
+                if all(c in filtered_df.columns for c in ['hour', 'temperature', 'use [kW]']):
+                    heatmap_df = filtered_df.copy()
+                    # Ensure we're using numeric columns only
+                    heatmap_df = heatmap_df[['hour', 'temperature', 'use [kW]']].dropna()
+                    
+                    fig = px.density_heatmap(
+                        heatmap_df,
+                        x='hour',
+                        y='temperature',
+                        z='use [kW]',
+                        histfunc='avg',
+                        title='Temperature by Hour with Energy Usage',
+                        labels={'hour': 'Hour of Day', 'temperature': 'Temperature (°C)'},
+                        nbinsx=24, 
+                        nbinsy=20
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Required columns missing for heatmap")
     
     with tab2:
-        col1, col2 = st.columns(2)
-        with col1:
-            try:
-                sample_df = filtered_df.sample(min(1000, len(filtered_df)))
-                fig = px.scatter(
-                    sample_df,
-                    x='temperature',
-                    y='use [kW]',
-                    color='hour',
-                    trendline="lowess",
-                    title='Temperature vs Consumption',
-                    labels={'temperature': 'Temperature (°C)', 'use [kW]': 'Power (kW)'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"Temperature scatter error: {str(e)}")
+        st.subheader("Energy Consumption Relationships")
         
-        with col2:
-            try:
-                fig = px.scatter(
-                    filtered_df.sample(min(1000, len(filtered_df))),
-                    x='humidity',
+        with st.expander("Temperature Impact", expanded=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                try:
+                    # Create temperature bins and calculate mean consumption
+                    temp_bins = pd.cut(filtered_df['temperature'], bins=10)
+                    temp_group = filtered_df.groupby(temp_bins)['use [kW]'].mean().reset_index()
+                    
+                    # Convert intervals to readable strings
+                    temp_group['temp_range'] = temp_group['temperature'].apply(
+                        lambda x: f"{x.left:.1f}°C to {x.right:.1f}°C"
+                    )
+                    
+                    fig = px.bar(
+                        temp_group,
+                        x='temp_range',
+                        y='use [kW]',
+                        title='Average Consumption by Temperature Range',
+                        labels={'use [kW]': 'Avg Power (kW)', 'temp_range': 'Temperature Range'}
+                    )
+                    fig.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                except Exception as e:
+                    st.error(f"Could not create temperature bins chart: {str(e)}")
+                
+            with col2:
+                try:
+                    sample_df = filtered_df.sample(min(1000, len(filtered_df)))
+                    fig = px.scatter(
+                        sample_df,
+                        x='temperature',
+                        y='use [kW]',
+                        color='hour',
+                        trendline="lowess",
+                        title='Temperature vs Consumption',
+                        labels={'temperature': 'Temperature (°C)', 'use [kW]': 'Power (kW)'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Temperature scatter error: {str(e)}")
+        
+        # Weather condition impact
+        with st.expander("Weather Condition Impact"):
+            if 'icon' in filtered_df.columns:
+                fig = px.box(
+                    filtered_df,
+                    x='icon',
                     y='use [kW]',
-                    color='temperature',
-                    trendline="lowess",
-                    title='Humidity vs Consumption',
-                    labels={'humidity': 'Humidity (%)', 'use [kW]': 'Power (kW)'}
+                    color='icon',
+                    title='Energy Consumption by Weather Condition',
+                    labels={'use [kW]': 'Power (kW)', 'icon': 'Weather Condition'}
                 )
                 st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.error(f"Humidity scatter error: {str(e)}")
+            else:
+                st.warning("Weather condition data not available")
+    
+    with tab3:
+        st.subheader("Detailed Weather Conditions")
+        
+        # Wind analysis
+        with st.expander("Wind Analysis"):
+            col1, col2 = st.columns(2)
+            with col1:
+                fig = px.line(
+                    hourly_df,
+                    x='date',
+                    y='windSpeed',
+                    title='Wind Speed Over Time',
+                    labels={'windSpeed': 'Wind Speed (km/h)', 'date': 'Date'}
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                if 'windBearing' in filtered_df.columns:
+                    fig = px.scatter_polar(
+                        filtered_df,
+                        r='windSpeed',
+                        theta='windBearing',
+                        color='temperature',
+                        title='Wind Direction and Speed',
+                        labels={'windSpeed': 'Wind Speed (km/h)'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        # Precipitation analysis
+        with st.expander("Precipitation Analysis"):
+            if 'precipIntensity' in filtered_df.columns:
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig = px.line(
+                        hourly_df,
+                        x='date',
+                        y='precipIntensity',
+                        title='Precipitation Intensity',
+                        labels={'precipIntensity': 'Intensity (mm/h)', 'date': 'Date'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    fig = px.scatter(
+                        filtered_df[filtered_df['precipIntensity'] > 0],
+                        x='precipIntensity',
+                        y='use [kW]',
+                        color='temperature',
+                        title='Energy Use During Precipitation',
+                        labels={'precipIntensity': 'Precipitation (mm/h)', 'use [kW]': 'Power (kW)'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Precipitation data not available")
 
 # ====================== MAIN APP ======================
 def main():
