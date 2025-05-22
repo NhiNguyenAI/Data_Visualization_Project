@@ -259,15 +259,10 @@ def display_metrics(df):
                     st.metric(name, f"{ratio:.1f}%", help=help_text)
             except Exception as e:
                 st.error(f"Error calculating {name}: {str(e)}")
+                
 
 # ====================== DASHBOARD PAGES ======================
 def overview_page(data):
-    """
-    Main overview page showing energy consumption and generation metrics.
-    
-    Args:
-        data (pd.DataFrame): Processed energy data
-    """
     st.header("🏠 Energy Overview")
     
     if data is None:
@@ -276,9 +271,84 @@ def overview_page(data):
         
     if 'use [kW]' not in data.columns:
         st.error("Column 'use [kW]' not found in data")
-        st.write("Available numeric columns:", data.columns.tolist())
         return
     
+    # ========== HEATMAP SECTION ==========
+    st.subheader("🌡️ Hourly Energy Consumption Patterns")
+    
+    # Prepare heatmap data
+    heatmap_data = data.copy()
+    heatmap_data['hour'] = heatmap_data.index.hour
+    heatmap_data['date'] = heatmap_data.index.date
+    heatmap_data['day_month'] = heatmap_data.index.strftime('%d/%m')  # Date format DD/MM
+    
+    # Get unique dates and limit to 30 most recent if needed
+    unique_dates = sorted(heatmap_data['date'].unique(), reverse=True)
+    display_dates = unique_dates[:30]  # Take most recent 30 days
+    heatmap_filtered = heatmap_data[heatmap_data['date'].isin(display_dates)]
+    
+    # Create pivot table - using day_month for display while keeping date for sorting
+    heatmap_pivot = heatmap_filtered.pivot_table(
+        index=['date', 'day_month'],  # Store both for sorting and display
+        columns='hour',
+        values='use [kW]',
+        aggfunc='mean'
+    )
+    
+    # Sort by date (newest first) but display day_month
+    heatmap_pivot = heatmap_pivot.sort_index(level='date', ascending=False)
+    
+    # Create heatmap with proper date display
+    fig_heatmap = px.imshow(
+        heatmap_pivot,
+        labels=dict(x="Hour of Day", y="Date", color="Energy Usage (kW)"),
+        x=heatmap_pivot.columns,
+        y=heatmap_pivot.index.get_level_values('day_month'),  # Use formatted dates for display
+        color_continuous_scale='thermal',
+        aspect="auto",
+        height=600 + (len(heatmap_pivot) * 3)
+    )
+    
+    # Customize heatmap appearance
+    fig_heatmap.update_layout(
+        title={
+            'text': "<b>Daily Energy Consumption Patterns by Hour</b>",
+            'y':0.95,
+            'x':0.5,
+            'xanchor': 'center',
+            'yanchor': 'top',
+            'font': {'size': 18}
+        },
+        xaxis_title="<b>Hour of Day</b>",
+        yaxis_title="<b>Date (DD/MM)</b>",
+        margin=dict(l=100, r=50, b=100, t=100),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(family="Arial", size=12)
+    )
+    
+    # Configure axes
+    fig_heatmap.update_xaxes(
+        tickmode='array',
+        tickvals=list(range(0, 24, 2)),
+        ticktext=[f"{h:02d}:00" for h in range(0, 24, 2)],
+        showgrid=True,
+        gridcolor='rgba(200,200,200,0.2)',
+        tickfont=dict(size=10)
+    )
+    
+    fig_heatmap.update_yaxes(
+        tickmode='array',
+        tickvals=list(range(len(heatmap_pivot))),
+        ticktext=heatmap_pivot.index.get_level_values('day_month'),
+        tickfont=dict(size=10),
+        automargin=True
+    )
+    
+    # Display the heatmap
+    st.plotly_chart(fig_heatmap, use_container_width=True)
+
+    # ========== REST OF OVERVIEW PAGE ==========
     start_date = data.index.min().date()
     end_date = data.index.max().date()
     
@@ -950,21 +1020,14 @@ def weather_page(df):
 
 # ====================== MAIN APP ======================
 def main():
-    """
-    Main application function that coordinates all components.
-    """
-    # Load data
     with st.spinner("Loading data..."):
         df = load_data()
     
-    # Process data
     with st.spinner("Processing data..."):
         processed_df = process_data(df)
     
-    # Navigation sidebar
     with st.sidebar:
         st.title("🏠 Navigation")
-        
         page = st.radio(
             "Select page",
             ["🏠 Overview", "🔌 Devices", "🌤️ Weather"],
@@ -986,7 +1049,6 @@ def main():
         
         st.markdown("---")
 
-        # Data export option
         if processed_df is not None and st.button("Create Data Sample"):
             try:
                 sample = processed_df.sample(min(1000, len(processed_df)))
@@ -1000,7 +1062,6 @@ def main():
             except Exception as e:
                 st.error(f"Sample creation error: {str(e)}")
     
-    # Page routing
     if processed_df is not None:
         if page == "🏠 Overview":
             overview_page(processed_df)
