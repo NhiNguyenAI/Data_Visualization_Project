@@ -476,7 +476,7 @@ def overview_page(data):
         tab1, tab2 = st.tabs(["DAILY ENERGY CONSUMPTION & GENERATION", "ENERGY SUMMARY BY DAY"])
 
         with tab1:
-            st.markdown("") 
+            st.markdown("")
             valid_dates = pd.Series(filtered.index.date).unique()
             
             if len(valid_dates) == 0:
@@ -491,88 +491,145 @@ def overview_page(data):
                 format="DD/MM/YYYY",
                 key="daily_detail_date"
             )
-            st.markdown("") 
+            st.markdown("")
             
+            # Filter hourly data for the selected date
             hourly_data = hourly_energy_use[hourly_energy_use.index.date == selected_date]
+            hourly_data_gen = hourly_data_gen[hourly_data_gen.index.date == selected_date]
+
+            if hourly_data.empty or hourly_data_gen.empty:
+                st.warning("No data available for selected date")
+                return
 
             # Calculate consumption metrics
-            daily_total = hourly_data['use [kW]'].sum()
-            max_hour = hourly_data['use [kW]'].idxmax()
-            max_value = hourly_data['use [kW]'].max()
-            avg_value = hourly_data['use [kW]'].mean()
+            total_energy_use = hourly_data['use [kW]'].sum()
+            peak_energy_use = hourly_data['use [kW]'].max()
+            peak_hour_use = hourly_data['use [kW]'].idxmax().strftime('%H:%M') if not hourly_data['use [kW]'].empty else "N/A"
+            mean_energy_use = hourly_data['use [kW]'].mean()
 
-            # Display metrics in columns
-            cols = st.columns(3)
-            cols[0].metric("Total Consumption", f"{daily_total:.2f} kWh")
-            cols[1].metric("Peak Hour", max_hour.strftime('%H:%M'), f"{max_value:.2f} kWh")
-            cols[2].metric("Hourly Average", f"{avg_value:.2f} kWh")
-         
-            st.markdown("")   
-            
+            # Display consumption metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric(
+                label="TOTAL CONSUMPTION",
+                value=f"{total_energy_use:,.2f} kWh"
+            )
+            col2.metric(
+                label="PEAK CONSUMPTION HOUR",
+                value=f"{peak_energy_use:.2f} kWh",
+                delta=f"Hour {peak_hour_use}"
+            )
+            col3.metric(
+                label="HOURLY AVERAGE CONSUMPTION",
+                value=f"{mean_energy_use:,.2f} kWh"
+            )
+
+            st.markdown("")
+
             # Calculate generation metrics
-            hourly_data_gen = hourly_data_gen[hourly_data_gen.index.date == selected_date]
-            daily_total_gen = hourly_data_gen['gen [kW]'].sum()
-            max_hour_gen = hourly_data_gen['gen [kW]'].idxmax()
-            max_value_gen = hourly_data_gen['gen [kW]'].max()
-            avg_value_gen = hourly_data_gen['gen [kW]'].mean()
-            
-            cols = st.columns(3)
-            cols[0].metric("Total Generation", f"{daily_total_gen:.2f} kWh")
-            cols[1].metric("Peak Hour", max_hour_gen.strftime('%H:%M'), f"{max_value_gen:.2f} kWh")
-            cols[2].metric("Hourly Average", f"{avg_value_gen:.2f} kWh")
-            
-            # Plot consumption and generation together
-            if not hourly_data.empty and not hourly_data_gen.empty:
-                combined_data = hourly_data[['use [kW]']].join(hourly_data_gen[['gen [kW]']], how='outer').fillna(0)
+            total_energy_gen = hourly_data_gen['gen [kW]'].sum()
+            peak_energy_gen = hourly_data_gen['gen [kW]'].max()
+            peak_hour_gen = hourly_data_gen['gen [kW]'].idxmax().strftime('%H:%M') if not hourly_data_gen['gen [kW]'].empty else "N/A"
+            mean_energy_gen = hourly_data_gen['gen [kW]'].mean()
 
+            # Display generation metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric(
+                label="TOTAL GENERATION",
+                value=f"{total_energy_gen:,.2f} kWh"
+            )
+            col2.metric(
+                label="PEAK GENERATION HOUR",
+                value=f"{peak_energy_gen:.2f} kWh",
+                delta=f"Hour {peak_hour_gen}"
+            )
+            col3.metric(
+                label="HOURLY AVERAGE GENERATION",
+                value=f"{mean_energy_gen:,.2f} kWh"
+            )
+
+            # Combine consumption and generation data
+            combined_data = pd.DataFrame({
+                'use [kW]': hourly_data['use [kW]'],
+                'gen [kW]': hourly_data_gen['gen [kW]']
+            }).fillna(0)
+
+            # Create grouped bar chart
+            fig = px.bar(
+                combined_data,
+                x=combined_data.index,
+                y=['use [kW]', 'gen [kW]'],
+                title=f"HOURLY ENERGY CONSUMPTION & GENERATION - {selected_date.strftime('%d/%m/%Y')}",
+                labels={'value': 'kWh', 'datetime': 'Hour'},
+                color_discrete_sequence=['#3498db', '#e74c3c']  # Match Tab 2 colors
+            )
+
+            # Customize chart to match Tab 2 styling
+            fig.update_layout(
+                xaxis_tickformat='%H:%M',
+                hovermode="x unified",
+                plot_bgcolor='white',
+                height=450,
+                barmode='group',  # Bars side by side
+                xaxis_title="Hour",
+                yaxis_title="kWh"
+            )
+
+            # Format hover and bar labels
+            fig.update_traces(
+                hovertemplate="<b>%{x|%H:%M}</b><br>%{y:.2f} kWh",
+                texttemplate='%{y:.1f}',
+                textposition='outside'
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Net energy section
+            st.subheader("NET ENERGY (CONSUMPTION - GENERATION)")
+
+            try:
+                # Calculate hourly net energy
+                hourly_net_data = pd.DataFrame({
+                    'use [kW]': hourly_data['use [kW]'],
+                    'gen [kW]': hourly_data_gen['gen [kW]']
+                }).fillna(0)
+                hourly_net_data['Net [kWh]'] = hourly_net_data['use [kW]'] - hourly_net_data['gen [kW]']
+                
+                # Create line chart for net energy
                 fig = px.line(
-                    combined_data,
-                    x=combined_data.index,
-                    y=['use [kW]', 'gen [kW]'],
-                    title=f"Energy Consumption & Generation - {selected_date.strftime('%d/%m/%Y')}",
-                    labels={'value': 'Energy (kWh)', 'datetime': 'Time', 'variable': 'Energy Type'},
+                    hourly_net_data,
+                    x=hourly_net_data.index,
+                    y='Net [kWh]',
+                    title=f'HOURLY NET ENERGY TREND - {selected_date.strftime("%d/%m/%Y")}',
+                    labels={
+                        'Net [kWh]': 'kWh',
+                        'datetime': 'Hour'
+                    },
+                    color_discrete_sequence=['#3498db'],  # Match Tab 2 color
                     markers=True
                 )
-
-                fig.update_traces(line=dict(width=3), marker=dict(size=8))
-
+                
+                # Customize chart to match Tab 2
                 fig.update_layout(
-                    xaxis_tickformat='%H:%M',
+                    xaxis_title="Hour",
+                    yaxis_title="kWh",
                     hovermode="x unified",
-                    yaxis_title="Energy (kWh)",
-                    xaxis_title="Time",
-                    legend_title_text='Energy Type'
+                    height=500,
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    xaxis=dict(
+                        showgrid=True,
+                        gridcolor='lightgray',
+                        tickformat='%H:%M'
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor='lightgray'
+                    )
                 )
-
-                # Add annotations for peak values
-                max_use_idx = combined_data['use [kW]'].idxmax()
-                max_use_val = combined_data['use [kW]'].max()
-                fig.add_annotation(
-                    x=max_use_idx,
-                    y=max_use_val,
-                    text=f"Max usage: {max_use_val:.2f} kWh",
-                    showarrow=True,
-                    arrowhead=1,
-                    ax=0,
-                    ay=-40
-                )
-
-                max_gen_idx = combined_data['gen [kW]'].idxmax()
-                max_gen_val = combined_data['gen [kW]'].max()
-                fig.add_annotation(
-                    x=max_gen_idx,
-                    y=max_gen_val,
-                    text=f"Max generation: {max_gen_val:.2f} kWh",
-                    showarrow=True,
-                    arrowhead=1,
-                    ax=0,
-                    ay=-40
-                )
-
+                
                 st.plotly_chart(fig, use_container_width=True)
-
-            else:
-                st.warning("No data available for selected date")
+                
+            except Exception as e:
+                st.error(f"Data processing error: {str(e)}")
 
         with tab2:
             st.markdown("") 
