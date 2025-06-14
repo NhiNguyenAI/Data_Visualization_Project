@@ -869,11 +869,32 @@ def overview_page(data):
     except Exception as e:
         st.error(f"Error occurred: {str(e)}")
         st.stop()
- 
+       
+def calculate_hourly_for_device(df, device_col):
+    """
+    Calculate hourly energy consumption for a specific device.
+    
+    Args:
+        df (pd.DataFrame): Input dataframe with datetime index
+        device_col (str): Column name for the device power usage
         
+    Returns:
+        pd.DataFrame: Hourly energy consumption in kWh for the device
+    """
+    if device_col not in df.columns:
+        return pd.DataFrame()
+    
+    # Ensure we only calculate on numeric columns
+    if not np.issubdtype(df[device_col].dtype, np.number):
+        return pd.DataFrame()
+    
+    # Resample to hourly sum and convert from kW to kWh
+    return df[[device_col]].resample('H').sum() / 60  # kW * 1h = kWh
+
 def devices_page(df):
     """
     Page showing energy consumption analysis by device.
+    
     """
     st.header("🔌 Device Analysis")
     
@@ -884,26 +905,27 @@ def devices_page(df):
     tab1, tab2, tab3 = st.tabs(["📊 Distribution", "⏱ Trends", "🔗 Correlations"])
     
     with tab1:
+        st.markdown("")
         # Get available date range
         min_date = df.index.min().date()
         max_date = df.index.max().date()
 
-        # Create date selection UI with calendar
+        # Create date selection UI with calendar for date range
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input(
-                "From date", 
-                min_date, 
-                min_value=min_date, 
+                "From date",
+                min_date,
+                min_value=min_date,
                 max_value=max_date,
                 key="device_start_date_calendar",
                 format="DD/MM/YYYY"
             )
         with col2:
             end_date = st.date_input(
-                "To date", 
-                max_date, 
-                min_value=min_date, 
+                "To date",
+                max_date,
+                min_value=min_date,
                 max_value=max_date,
                 key="device_end_date_calendar",
                 format="DD/MM/YYYY"
@@ -916,10 +938,6 @@ def devices_page(df):
         st.markdown("")
 
         try:
-            # Filter data by selected date range
-            date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
-            filtered_data = df.loc[date_mask]
-            
             # Device selection
             selected_device = st.selectbox(
                 "Select a device to analyze",
@@ -928,54 +946,183 @@ def devices_page(df):
                 key="device_select"
             )
             
-            if not selected_device or selected_device not in filtered_data.columns:
+            if not selected_device or selected_device not in df.columns:
                 st.warning("Please select a valid device")
                 return
             
-            # Calculate daily consumption
-            daily_consumption = filtered_data[[selected_device]].resample('D').sum() / 60  # Convert kW to kWh
+            # Filter data by selected date range
+            date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+            filtered_data = df.loc[date_mask]
+            
+            # Calculate daily consumption for metrics (full date range)
+            daily_consumption = calculate_daily_for_device(filtered_data, selected_device)
             
             if daily_consumption.empty:
-                st.warning(f"No data available for {selected_device} in selected period")
+                st.warning(f"No data available for {selected_device} from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
                 return
                 
-            # Display metrics in columns
+            # Display metrics in columns (full date range)
             cols = st.columns(3)
             cols[0].metric(
-                "Total Consumption", 
+                "Total Consumption",
                 f"{daily_consumption[selected_device].sum():,.2f} kWh"
             )
             cols[1].metric(
-                "Peak Consumption Day", 
+                "Peak Consumption Day",
                 f"{daily_consumption[selected_device].max():,.2f} kWh",
                 delta=f"Date {daily_consumption[selected_device].idxmax().strftime('%d/%m')}"
             )
             cols[2].metric(
-                "Daily Average", 
+                "Daily Average",
                 f"{daily_consumption[selected_device].mean():,.2f} kWh"
             )
+            st.markdown("")
 
+            # Single date selector for hourly chart
+            valid_dates = pd.Series(filtered_data.index.date).unique()
+            if len(valid_dates) == 0:
+                st.warning("No valid dates available in selected range")
+                return
+                
+            hourly_date = st.date_input(
+                "Select date for hourly consumption",
+                valid_dates[0],
+                min_value=valid_dates.min(),
+                max_value=valid_dates.max(),
+                format="DD/MM/YYYY",
+                key="device_hourly_date"
+            )
+            st.markdown("")
+
+            # Hourly Chart
+            st.subheader(f"Hourly Consumption for {selected_device.replace(' [kW]', '')}")
+            hourly_date_mask = (filtered_data.index.date == hourly_date)
+            hourly_filtered_data = filtered_data.loc[hourly_date_mask]
             
-           # Plot device consumption with peak annotations
-            if not daily_consumption.empty:
-                fig = px.line(
-                    daily_consumption.reset_index(),
-                    x=daily_consumption.index.name or 'index',  # fallback if unnamed
+            hourly_consumption = calculate_hourly_for_device(hourly_filtered_data, selected_device)
+            
+            if hourly_consumption.empty:
+                st.warning(f"No hourly data available for {selected_device} on {hourly_date.strftime('%d/%m/%Y')}")
+            else:
+                # Hourly range slider
+                slider_hour_range = st.slider(
+                    "Select hour range to zoom",
+                    min_value=0,
+                    max_value=23,
+                    value=(0, 23),
+                    step=1,
+                    format="%d:00",
+                    key="device_tab1_hour_slider"
+                )
+                
+                # Extract slider start and end hours
+                slider_start_hour, slider_end_hour = slider_hour_range
+                
+                # Filter hourly data for slider range
+                slider_mask = (hourly_consumption.index.hour >= slider_start_hour) & (hourly_consumption.index.hour <= slider_end_hour)
+                slider_hourly_data = hourly_consumption[slider_mask]
+                
+                if slider_hourly_data.empty:
+                    st.warning(f"No data available for {selected_device} in selected hour range")
+                else:
+                    fig_hourly = px.line(
+                        slider_hourly_data.reset_index(),
+                        x=slider_hourly_data.index.name or 'time',
+                        y=selected_device,
+                        title=f"{selected_device.replace(' [kW]', '')} Hourly Consumption - {hourly_date.strftime('%d/%m/%Y')} ({slider_start_hour:02d}:00 to {slider_end_hour:02d}:00)",
+                        labels={
+                            slider_hourly_data.index.name or 'time': 'Hour',
+                            selected_device: 'Consumption (kWh)'
+                        },
+                        markers=True
+                    )
+
+                    fig_hourly.update_traces(
+                        line=dict(width=3, color='#1f77b4'),
+                        marker=dict(size=8, color='#1f77b4')
+                    )
+
+                    fig_hourly.update_layout(
+                        xaxis_tickformat='%H:%M',
+                        hovermode="x unified",
+                        yaxis_title="Consumption (kWh)",
+                        xaxis_title="Hour",
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        height=500
+                    )
+
+                    # Add annotations for peak values
+                    max_consump_idx = slider_hourly_data[selected_device].idxmax()
+                    max_consump_val = slider_hourly_data[selected_device].max()
+                    
+                    fig_hourly.add_annotation(
+                        x=max_consump_idx,
+                        y=max_consump_val,
+                        text=f"Peak: {max_consump_val:.2f} kWh",
+                        showarrow=True,
+                        arrowhead=1,
+                        ax=0,
+                        ay=-40,
+                        bgcolor="white"
+                    )
+
+                    # Add annotation for minimum value
+                    min_consump_idx = slider_hourly_data[selected_device].idxmin()
+                    min_consump_val = slider_hourly_data[selected_device].min()
+                    
+                    fig_hourly.add_annotation(
+                        x=min_consump_idx,
+                        y=min_consump_val,
+                        text=f"Min: {min_consump_val:.2f} kWh",
+                        showarrow=True,
+                        arrowhead=1,
+                        ax=0,
+                        ay=40,
+                        bgcolor="white"
+                    )
+
+                    st.plotly_chart(fig_hourly, use_container_width=True)
+
+            # Daily Chart
+            st.subheader(f"Daily Consumption for {selected_device.replace(' [kW]', '')}")
+            # Date range slider for daily chart
+            slider_date_range = st.slider(
+                "Select date range to zoom",
+                min_value=start_date,
+                max_value=end_date,
+                value=(start_date, end_date),
+                format="DD/MM/YYYY",
+                key="device_tab1_date_slider"
+            )
+            
+            # Extract slider start and end dates
+            slider_start_date, slider_end_date = slider_date_range
+            
+            # Filter daily consumption for slider date range
+            slider_date_mask = (daily_consumption.index.date >= slider_start_date) & (daily_consumption.index.date <= slider_end_date)
+            slider_daily_data = daily_consumption[slider_date_mask]
+            
+            if slider_daily_data.empty:
+                st.warning(f"No data available for {selected_device} in selected date range")
+            else:
+                fig_daily = px.line(
+                    slider_daily_data.reset_index(),
+                    x=slider_daily_data.index.name or 'time',
                     y=selected_device,
-                    title=f"{selected_device.replace(' [kW]', '')} Daily Consumption",
+                    title=f"{selected_device.replace(' [kW]', '')} Daily Consumption - {slider_start_date.strftime('%d/%m/%Y')} to {slider_end_date.strftime('%d/%m/%Y')}",
                     labels={
-                        daily_consumption.index.name or 'index': 'Date',
+                        slider_daily_data.index.name or 'time': 'Date',
                         selected_device: 'Consumption (kWh)'
                     },
                     markers=True
-)
+                )
 
-                fig.update_traces(
+                fig_daily.update_traces(
                     line=dict(width=3, color='#1f77b4'),
                     marker=dict(size=8, color='#1f77b4')
                 )
 
-                fig.update_layout(
+                fig_daily.update_layout(
                     xaxis_tickformat='%d/%m',
                     hovermode="x unified",
                     yaxis_title="Consumption (kWh)",
@@ -985,10 +1132,10 @@ def devices_page(df):
                 )
 
                 # Add annotations for peak values
-                max_consump_idx = daily_consumption[selected_device].idxmax()
-                max_consump_val = daily_consumption[selected_device].max()
+                max_consump_idx = slider_daily_data[selected_device].idxmax()
+                max_consump_val = slider_daily_data[selected_device].max()
                 
-                fig.add_annotation(
+                fig_daily.add_annotation(
                     x=max_consump_idx,
                     y=max_consump_val,
                     text=f"Peak: {max_consump_val:.2f} kWh",
@@ -999,11 +1146,11 @@ def devices_page(df):
                     bgcolor="white"
                 )
 
-                # Add annotation for minimum value if you want
-                min_consump_idx = daily_consumption[selected_device].idxmin()
-                min_consump_val = daily_consumption[selected_device].min()
+                # Add annotation for minimum value
+                min_consump_idx = slider_daily_data[selected_device].idxmin()
+                min_consump_val = slider_daily_data[selected_device].min()
                 
-                fig.add_annotation(
+                fig_daily.add_annotation(
                     x=min_consump_idx,
                     y=min_consump_val,
                     text=f"Min: {min_consump_val:.2f} kWh",
@@ -1014,10 +1161,11 @@ def devices_page(df):
                     bgcolor="white"
                 )
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig_daily, use_container_width=True)
             
         except Exception as e:
             st.error(f"Error displaying device data: {str(e)}")
+    
     with tab2:
         # Get date range from data
         min_date = df.index.min().date()
@@ -1153,7 +1301,10 @@ def devices_page(df):
                 
         except Exception as e:
             st.error(f"Error processing device data: {str(e)}")
-
+    
+    with tab3:
+        print("Tab 3: Correlations")     
+          
 def weather_page(df):
     """
     Weather Impact Analysis:
