@@ -21,7 +21,7 @@ DEVICES = [
     'Kitchen 38 [kW]', 'Barn [kW]', 'Well [kW]',
     'Microwave [kW]', 'Living room [kW]', 'Solar [kW]'
 ]
-
+NON_SOLAR_DEVICES = [device for device in DEVICES if device != 'Solar [kW]']
 WEATHER = [
     'temperature', 'humidity', 'windSpeed', 
     'windBearing', 'pressure', 'apparentTemperature',
@@ -145,6 +145,27 @@ def calculate_daily_for_device(df, device_col):
     
     # Resample to daily sum and convert from kW to kWh
     return df[[device_col]].resample('D').sum() / 60
+
+def calculate_hourly_for_device(df, device_col):
+    """
+    Calculate hourly energy consumption for a specific device.
+    
+    Args:
+        df (pd.DataFrame): Input dataframe with datetime index
+        device_col (str): Column name for the device power usage
+        
+    Returns:
+        pd.DataFrame: Hourly energy consumption in kWh for the device
+    """
+    if device_col not in df.columns:
+        return pd.DataFrame()
+    
+    # Ensure we only calculate on numeric columns
+    if not np.issubdtype(df[device_col].dtype, np.number):
+        return pd.DataFrame()
+    
+    # Resample to hourly sum and convert from kW to kWh
+    return df[[device_col]].resample('H').sum() / 60  # kW * 1h = kWh
 
 def show_weather_metrics(df, cols):
     metrics = [
@@ -870,26 +891,6 @@ def overview_page(data):
         st.error(f"Error occurred: {str(e)}")
         st.stop()
        
-def calculate_hourly_for_device(df, device_col):
-    """
-    Calculate hourly energy consumption for a specific device.
-    
-    Args:
-        df (pd.DataFrame): Input dataframe with datetime index
-        device_col (str): Column name for the device power usage
-        
-    Returns:
-        pd.DataFrame: Hourly energy consumption in kWh for the device
-    """
-    if device_col not in df.columns:
-        return pd.DataFrame()
-    
-    # Ensure we only calculate on numeric columns
-    if not np.issubdtype(df[device_col].dtype, np.number):
-        return pd.DataFrame()
-    
-    # Resample to hourly sum and convert from kW to kWh
-    return df[[device_col]].resample('H').sum() / 60  # kW * 1h = kWh
 
 def devices_page(df):
     """
@@ -941,7 +942,7 @@ def devices_page(df):
             # Device selection
             selected_device = st.selectbox(
                 "Select a device to analyze",
-                DEVICES,
+                NON_SOLAR_DEVICES,
                 index=0,
                 key="device_select"
             )
@@ -1201,16 +1202,16 @@ def devices_page(df):
         date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
         filtered_df = df.loc[date_mask]
         
-        # Device selection
+        # Device selection (exclude Solar [kW])
         selected_devices = st.multiselect(
             "Select devices to analyze (or leave empty for all devices)",
-            DEVICES,
+            NON_SOLAR_DEVICES,
             default=[],
             key="devices_tab2_select"
         )
         
-        # Use all devices if none selected
-        devices_to_analyze = selected_devices if selected_devices else DEVICES
+        # Use all non-solar devices if none selected
+        devices_to_analyze = selected_devices if selected_devices else NON_SOLAR_DEVICES
         
         try:
             # Calculate total consumption for each device
@@ -1220,7 +1221,7 @@ def devices_page(df):
             total_consumption = device_totals.sum()
             device_percentages = (device_totals / total_consumption * 100).round(1)
             
-            # Get top 5 devices and group the rest into "Other"
+            # Get top 5 devices and group the rest into "Other" for pie chart
             top_devices = device_percentages.head(5)
             other_devices = device_percentages[5:]
             
@@ -1228,10 +1229,24 @@ def devices_page(df):
                 other_percentage = other_devices.sum()
                 top_devices['Other'] = other_percentage
             
-            # Prepare data for visualization
+            # Prepare data for pie chart
             pie_data = top_devices.reset_index()
             pie_data.columns = ['Device', 'Percentage']
             pie_data['Device'] = pie_data['Device'].str.replace(" [kW]", "")
+            
+            # Prepare data for bar chart (top 5 devices only, no "Other")
+            bar_data = device_totals.head(5).reset_index()
+            bar_data.columns = ['Device', 'Consumption']
+            bar_data['Device'] = bar_data['Device'].str.replace(" [kW]", "")
+            
+            # Create color mapping to ensure consistency
+            # Map top 5 devices to the first 5 colors, "Other" (if present) to the 6th
+            color_map = {}
+            top_5_devices = bar_data['Device'].tolist()
+            for i, device in enumerate(top_5_devices):
+                color_map[device] = px.colors.sequential.RdBu[i]
+            if 'Other' in pie_data['Device'].values:
+                color_map['Other'] = px.colors.sequential.RdBu[5]  # Use 6th color for "Other"
             
             # Display metrics in columns - top 5 devices
             st.subheader("Top 5 Energy-Consuming Devices")
@@ -1257,7 +1272,8 @@ def devices_page(df):
                     title='Energy Consumption Distribution (Top 5 + Other)',
                     hover_data=['Percentage'],
                     labels={'Percentage': '% of total'},
-                    color_discrete_sequence=px.colors.sequential.RdBu
+                    color='Device',
+                    color_discrete_map=color_map
                 )
                 fig_pie.update_traces(
                     textposition='inside',
@@ -1274,19 +1290,15 @@ def devices_page(df):
                 st.plotly_chart(fig_pie, use_container_width=True)
             
             with col2:
-                # Bar chart showing absolute consumption for all devices
-                devive_totals_top_5 = device_totals.head(5).reset_index()
-                devive_totals_top_5.columns = ['Device', 'Consumption']
-                devive_totals_top_5['Device'] = devive_totals_top_5['Device'].str.replace(" [kW]", "")
-                
+                # Bar chart showing absolute consumption for top 5 devices
                 fig_bar = px.bar(
-                    devive_totals_top_5,
+                    bar_data,
                     x='Device',
                     y='Consumption',
                     title='Detailed Consumption by Device',
                     labels={'Consumption': 'Energy (kW)'},
-                    color='Consumption',
-                    color_continuous_scale='RdBu'
+                    color='Device',
+                    color_discrete_map=color_map
                 )
                 fig_bar.update_traces(
                     hovertemplate="<b>%{x}</b><br>%{y:,.0f} kW"
@@ -1295,7 +1307,7 @@ def devices_page(df):
                     xaxis_title="Device",
                     yaxis_title="Total Consumption (kW)",
                     xaxis={'categoryorder':'total descending'},
-                    coloraxis_showscale=False
+                    showlegend=False
                 )
                 st.plotly_chart(fig_bar, use_container_width=True)
                 
@@ -1304,7 +1316,8 @@ def devices_page(df):
     
     with tab3:
         print("Tab 3: Correlations")     
-          
+
+         
 def weather_page(df):
     """
     Weather Impact Analysis:
