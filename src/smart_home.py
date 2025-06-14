@@ -398,9 +398,29 @@ def overview_page(data):
                 kwh = heatmap_pivot.iloc[i, j] if not pd.isna(heatmap_pivot.iloc[i, j]) else "No data"
                 hover_data[i, j] = f"Date: {date_str}<br>Week: {week}<br>Day: {weekday_names[i]}<br>Energy: {kwh:.2f} kWh" if kwh != "No data" else f"Date: {date_str}<br>Week: {week}<br>Day: {weekday_names[i]}<br>Energy: No data"
 
-        # Create heatmap with Plotly
+        # Energy range slider for heatmap
+        kwh_min = yearly_data['kWh'].min() if not yearly_data['kWh'].empty else 0
+        kwh_max = yearly_data['kWh'].max() if not yearly_data['kWh'].empty else 1
+        slider_kwh_range = st.slider(
+            "Select energy consumption range (kWh/day) to filter",
+            min_value=float(kwh_min),
+            max_value=float(kwh_max),
+            value=(float(kwh_min), float(kwh_max)),
+            step=0.01,
+            format="%.2f",
+            key="heatmap_kwh_slider"
+        )
+
+        # Extract slider min and max kWh values
+        slider_kwh_min, slider_kwh_max = slider_kwh_range
+
+        # Filter heatmap data for slider kWh range
+        filtered_heatmap_pivot = heatmap_pivot.copy()
+        filtered_heatmap_pivot[(filtered_heatmap_pivot < slider_kwh_min) | (filtered_heatmap_pivot > slider_kwh_max)] = np.nan
+
+        # Create heatmap with filtered data
         fig = px.imshow(
-            heatmap_pivot,
+            filtered_heatmap_pivot,
             labels=dict(x="Week (by Month)", y="Day of Week", color="Energy (kWh)"),
             color_continuous_scale=[
                 [0.0, "#138413"],  # Low energy: green
@@ -449,8 +469,8 @@ def overview_page(data):
         fig.update_traces(
             xgap=2,  # Small gap between cells for clarity
             ygap=2,
-            zmin=0,  # Minimum energy value for color scaling
-            zmax=yearly_data['kWh'].max() if not yearly_data['kWh'].empty else 1,  # Max energy for scaling
+            zmin=slider_kwh_min,  # Set color scale to slider range
+            zmax=slider_kwh_max,
             customdata=hover_data,
             hovertemplate="%{customdata}<extra></extra>"
         )
@@ -463,11 +483,12 @@ def overview_page(data):
             st.markdown("""
             - **Columns**: Weeks of the year, labeled by the dominant month (e.g., January, February).
             - **Rows**: Days of the week (Monday to Sunday).
-            - **Color intensity**: Daily energy consumption in kWh.
-            - **Darker colors**: Higher energy consumption.
+            - **Color intensity**: Daily energy consumption in kWh, filtered by the selected energy range.
+            - **Darker colors**: Higher energy consumption within the range.
             - Hover over cells to see the specific date, week number, day, and energy value.
-            - Missing data appears as empty cells.
+            - Missing or filtered-out data (outside the energy range) appears as empty cells.
             - Only the first week of each month is labeled for clarity.
+            - Use the slider to filter the energy consumption range displayed.
             """)
 
         tab1, tab2 = st.tabs(["DAILY ENERGY CONSUMPTION & GENERATION", "ENERGY SUMMARY BY DAY"])
@@ -848,7 +869,8 @@ def overview_page(data):
     except Exception as e:
         st.error(f"Error occurred: {str(e)}")
         st.stop()
-
+ 
+        
 def devices_page(df):
     """
     Page showing energy consumption analysis by device.
