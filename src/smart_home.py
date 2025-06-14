@@ -183,14 +183,37 @@ def calculate_monthly_for_device(df, device_col):
     """
     if device_col not in df.columns:
         return pd.DataFrame()
-    
+        
     # Ensure we only calculate on numeric columns
     if not np.issubdtype(df[device_col].dtype, np.number):
         return pd.DataFrame()
-    
-    # Resample to monthly sum and convert from kW to kWh
-    return df[[device_col]].resample('ME').sum() / 60  # kW to kWh
-
+        
+    # Try different frequency strings for pandas compatibility
+    try:
+        # For pandas 2.2+ use 'M' for month-end
+        return df[[device_col]].resample('M').sum() / 60  # kW to kWh
+    except ValueError:
+        try:
+            # For older pandas versions, try 'ME'
+            return df[[device_col]].resample('ME').sum() / 60  # kW to kWh
+        except ValueError:
+            try:
+                # Alternative: use 'MS' for month-start
+                return df[[device_col]].resample('MS').sum() / 60  # kW to kWh
+            except ValueError:
+                # Fallback: manual monthly grouping
+                monthly_data = df[[device_col]].groupby([
+                    df.index.year, 
+                    df.index.month
+                ]).sum() / 60
+                
+                # Create proper datetime index for monthly data
+                monthly_index = pd.to_datetime([
+                    f"{year}-{month:02d}-01" 
+                    for year, month in monthly_data.index
+                ])
+                monthly_data.index = monthly_index
+                return monthly_data
 def show_weather_metrics(df, cols):
     metrics = [
         ('temperature', '🌡️ Avg Temp', '°C'),
@@ -331,352 +354,6 @@ def display_metrics(df):
             except Exception as e:
                 st.error(f"Error calculating {name}: {str(e)}")
 
-# ====================== FORECASTING PAGE ======================
-def forecasting_page(df):
-    """
-    Page showing time series forecasting for a selected device's daily energy consumption.
-    """
-    st.header("📈 Energy Consumption Forecasting")
-    
-    if df is None:
-        st.warning("No data available")
-        return
-
-    st.markdown("")
-    # Get available date range
-    min_date = df.index.min().date()
-    max_date = df.index.max().date()
-
-    # Create date selection UI with calendar for historical data
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input(
-            "From date",
-            min_date,
-            min_value=min_date,
-            max_value=max_date,
-            key="forecast_start_date",
-            format="DD/MM/YYYY"
-        )
-    with col2:
-        end_date = st.date_input(
-            "To date",
-            max_date,
-            min_value=min_date,
-            max_value=max_date,
-            key="forecast_end_date",
-            format="DD/MM/YYYY"
-        )
-
-    # Validate date range
-    if start_date > end_date:
-        st.error("End date must be after start date!")
-        st.stop()
-
-    # Device selection
-    selected_device = st.selectbox(
-        "Select a device to forecast",
-        NON_SOLAR_DEVICES,
-        index=0,
-        key="forecast_device_select"
-    )
-
-    # Forecast horizon selection
-    forecast_horizon = st.selectbox(
-        "Select forecast horizon (days)",
-        [7, 14, 30],
-        index=0,
-        key="forecast_horizon"
-    )
-
-    try:
-        # Filter data by date range
-        date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
-        filtered_df = df.loc[date_mask]
-
-        # Calculate daily consumption for the selected device
-        daily_data = calculate_daily_for_device(filtered_df, selected_device)
-        
-        if daily_data.empty:
-            st.warning(f"No data available for {selected_device} from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
-            return
-
-        # Prepare data for forecasting
-        daily_data = daily_data.reset_index()
-        daily_data = daily_data.rename(columns={'time': 'ds', selected_device: 'y'})
-        daily_data['ds'] = pd.to_datetime(daily_data['ds'])
-
-        # Remove duplicate dates and sort
-        daily_data = daily_data.drop_duplicates(subset=['ds'], keep='last').sort_values('ds')
-
-        # Create a complete date range and merge to fill missing dates
-        full_date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-        full_df = pd.DataFrame({'ds': full_date_range})
-        daily_data = full_df.merge(daily_data, on='ds', how='left')
-        
-        # Check for missing data and list missing dates
-        missing_dates = daily_data[daily_data['y'].isna()]['ds'].tolist()
-        missing_count = len(missing_dates)
-        if missing_count > 0:
-            st.info(f"Missing {missing_count} days ({(missing_count/len(full_date_range)*100):.1f}%): {[d.strftime('%d/%m/%Y') for d in missing_dates]}")
-            # Offer to download missing dates
-            if missing_dates:
-                missing_df = pd.DataFrame({'Missing Dates': [d.strftime('%d/%m/%Y') for d in missing_dates]})
-                st.download_button(
-                    "Download Missing Dates",
-                    missing_df.to_csv(index=False).encode('utf-8'),
-                    "missing_dates.csv",
-                    "text/csv"
-                )
-        if missing_count > len(full_date_range) * 0.1:  # Warn if >10% missing
-            st.warning(f"Warning: {missing_count} days ({(missing_count/len(full_date_range)*100):.1f}%) are missing data. Results may be unreliable.")
-        
-        # Fill missing values with interpolation, fallback to forward/backward fill and zero
-        daily_data['y'] = daily_data['y'].interpolate(method='linear').fillna(method='ffill').fillna(method='bfill').fillna(0)
-
-        # Ensure sufficient data
-        if len(daily_data) < 30:
-            st.warning("Insufficient data for forecasting (minimum 30 days required)")
-            return
-
-        # Ensure last date matches end_date
-        if daily_data['ds'].max().date() != end_date:
-            st.warning(f"Data ends at {daily_data['ds'].max().date().strftime('%d/%m/%Y')}, not {end_date.strftime('%d/%m/%Y')}. Adjusting forecast start.")
-
-        # Prophet Forecasting
-        prophet_model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
-        prophet_model.fit(daily_data[['ds', 'y']])
-
-        # Create future dataframe for Prophet
-        future_dates = prophet_model.make_future_dataframe(periods=forecast_horizon, freq='D')
-        prophet_forecast = prophet_model.predict(future_dates)
-        prophet_forecast = prophet_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
-
-        # ARIMA Forecasting
-        arima_model = ARIMA(daily_data['y'], order=(5, 1, 0))  # Simple ARIMA(5,1,0)
-        arima_results = arima_model.fit()
-        arima_forecast = arima_results.get_forecast(steps=forecast_horizon)
-        arima_mean = arima_forecast.predicted_mean
-        arima_conf_int = arima_forecast.conf_int(alpha=0.05)
-        
-        # Prepare ARIMA forecast dataframe - FIXED VERSION
-        # Get the last date from the data
-        last_date = daily_data['ds'].max()
-        
-        # Create forecast dates using pd.Timedelta for proper datetime arithmetic
-        arima_dates = []
-        for i in range(1, forecast_horizon + 1):
-            forecast_date = last_date + pd.Timedelta(days=i)
-            arima_dates.append(forecast_date)
-        
-        forecast_arima = pd.DataFrame({
-            'ds': arima_dates,
-            'yhat': arima_mean.values,
-            'yhat_lower': arima_conf_int.iloc[:, 0].values,
-            'yhat_upper': arima_conf_int.iloc[:, 1].values
-        })
-        
-        # Set historical yhat, yhat_lower, yhat_upper to y for consistency
-        historical_arima = daily_data[['ds', 'y']].copy()
-        historical_arima['yhat'] = historical_arima['y']
-        historical_arima['yhat_lower'] = historical_arima['y']
-        historical_arima['yhat_upper'] = historical_arima['y']
-        
-        # Concatenate historical and forecast data
-        arima_forecast_df = pd.concat([historical_arima[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], forecast_arima], ignore_index=True)
-
-        # Combine historical and forecast data for visualization
-        historical_data = daily_data[['ds', 'y']].copy()
-        historical_data['type'] = 'Historical'
-        
-        prophet_data = prophet_forecast.copy()
-        prophet_data['type'] = 'Prophet Forecast'
-        prophet_data['y'] = prophet_data['yhat']
-        
-        arima_data = arima_forecast_df.copy()
-        arima_data['type'] = 'ARIMA Forecast'
-        arima_data['y'] = arima_data['yhat']
-
-        # Create combined dataframe for plotting
-        plot_data = pd.concat([
-            historical_data[['ds', 'y', 'type']],
-            prophet_data[['ds', 'y', 'type', 'yhat_lower', 'yhat_upper']],
-            arima_data[['ds', 'y', 'type', 'yhat_lower', 'yhat_upper']]
-        ], ignore_index=True)
-
-        # Create line chart
-        fig = go.Figure()
-
-        # Historical data
-        historical_plot = plot_data[plot_data['type'] == 'Historical']
-        fig.add_trace(go.Scatter(
-            x=historical_plot['ds'],
-            y=historical_plot['y'],
-            mode='lines+markers',
-            name='Historical',
-            line=dict(color='#1f77b4', width=2),
-            marker=dict(size=6)
-        ))
-
-        # Prophet forecast
-        prophet_plot = plot_data[plot_data['type'] == 'Prophet Forecast']
-        fig.add_trace(go.Scatter(
-            x=prophet_plot['ds'],
-            y=prophet_plot['y'],
-            mode='lines',
-            name='Prophet Forecast',
-            line=dict(color='#ff7f0e', width=2, dash='dash')
-        ))
-        fig.add_trace(go.Scatter(
-            x=prophet_plot['ds'],
-            y=prophet_plot['yhat_upper'],
-            mode='lines',
-            name='Prophet Upper CI',
-            line=dict(color='rgba(255, 127, 14, 0.2)', width=0),
-            showlegend=False
-        ))
-        fig.add_trace(go.Scatter(
-            x=prophet_plot['ds'],
-            y=prophet_plot['yhat_lower'],
-            mode='lines',
-            name='Prophet Lower CI',
-            line=dict(color='rgba(255, 127, 14, 0.2)', width=0),
-            fill='tonexty',
-            fillcolor='rgba(255, 127, 14, 0.2)',
-            showlegend=False
-        ))
-
-        # ARIMA forecast
-        arima_plot = plot_data[plot_data['type'] == 'ARIMA Forecast']
-        fig.add_trace(go.Scatter(
-            x=arima_plot['ds'],
-            y=arima_plot['y'],
-            mode='lines',
-            name='ARIMA Forecast',
-            line=dict(color='#2ca02c', width=2, dash='dot')
-        ))
-        fig.add_trace(go.Scatter(
-            x=arima_plot['ds'],
-            y=arima_plot['yhat_upper'],
-            mode='lines',
-            name='ARIMA Upper CI',
-            line=dict(color='rgba(44, 160, 44, 0.2)', width=0),
-            showlegend=False
-        ))
-        fig.add_trace(go.Scatter(
-            x=arima_plot['ds'],
-            y=arima_plot['yhat_lower'],
-            mode='lines',
-            name='ARIMA Lower CI',
-            line=dict(color='rgba(44, 160, 44, 0.2)', width=0),
-            fill='tonexty',
-            fillcolor='rgba(44, 160, 44, 0.2)',
-            showlegend=False
-        ))
-
-        # Add vertical line for forecast start (alternative approach)
-        forecast_start = daily_data['ds'].max()
-        
-        # Get y-axis range for the vertical line
-        all_y_values = []
-        for trace_data in [historical_plot, prophet_plot, arima_plot]:
-            if not trace_data.empty:
-                all_y_values.extend(trace_data['y'].dropna().tolist())
-        
-        if all_y_values:
-            y_min = min(all_y_values)
-            y_max = max(all_y_values)
-            
-            # Add vertical line using add_trace instead of add_vline
-            fig.add_trace(go.Scatter(
-                x=[forecast_start, forecast_start],
-                y=[y_min, y_max],
-                mode='lines',
-                line=dict(color='gray', width=2, dash='dash'),
-                name='Forecast Start',
-                showlegend=False,
-                hovertemplate='Forecast Start<br>Date: %{x}<extra></extra>'
-            ))
-            
-            # Add annotation manually
-            fig.add_annotation(
-                x=forecast_start,
-                y=y_max * 0.9,
-                text="Forecast Start",
-                showarrow=True,
-                arrowhead=2,
-                arrowcolor="gray",
-                bgcolor="white",
-                bordercolor="gray",
-                borderwidth=1
-            )
-
-        # Update layout
-        fig.update_layout(
-            title=f"Daily Energy Consumption Forecast for {selected_device.replace(' [kW]', '')}",
-            xaxis_title="Date",
-            yaxis_title="Consumption (kWh)",
-            hovermode="x unified",
-            plot_bgcolor='rgba(0,0,0,0)',
-            height=600,
-            xaxis=dict(
-                tickformat='%d/%m/%Y',
-                showgrid=True,
-                gridcolor='lightgray'
-            ),
-            yaxis=dict(
-                showgrid=True,
-                gridcolor='lightgray'
-            ),
-            legend=dict(
-                x=0.01,
-                y=0.99,
-                bgcolor='rgba(255,255,255,0.8)'
-            ),
-            margin=dict(t=80, b=80, l=80, r=80)
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Display forecast summary
-        st.subheader("📊 Forecast Summary")
-        
-        # Get forecast-only data
-        forecast_only_prophet = prophet_forecast[prophet_forecast['ds'] > daily_data['ds'].max()]
-        forecast_only_arima = forecast_arima.copy()
-        
-        if not forecast_only_prophet.empty and not forecast_only_arima.empty:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Prophet Forecast**")
-                prophet_avg = forecast_only_prophet['yhat'].mean()
-                prophet_total = forecast_only_prophet['yhat'].sum()
-                st.metric("Average Daily", f"{prophet_avg:.2f} kWh")
-                st.metric("Total Period", f"{prophet_total:.2f} kWh")
-                
-            with col2:
-                st.markdown("**ARIMA Forecast**")
-                arima_avg = forecast_only_arima['yhat'].mean()
-                arima_total = forecast_only_arima['yhat'].sum()
-                st.metric("Average Daily", f"{arima_avg:.2f} kWh")
-                st.metric("Total Period", f"{arima_total:.2f} kWh")
-
-        # Expander with instructions
-        with st.expander("How to read the forecast chart"):
-            st.markdown("""
-            - **Historical Data**: Blue line shows actual daily consumption for the selected device.
-            - **Prophet Forecast**: Orange dashed line shows predicted consumption using Facebook Prophet, with shaded confidence intervals.
-            - **ARIMA Forecast**: Green dotted line shows predicted consumption using ARIMA, with shaded confidence intervals.
-            - **Forecast Start**: Gray vertical line marks the start of the forecast period.
-            - **Hover**: View exact values and dates.
-            - Adjust the date range, device, and forecast horizon to explore different scenarios.
-            - Note: The visualization prioritizes clarity over prediction accuracy.
-            """)
-
-    except Exception as e:
-        st.error(f"Error in forecasting: {str(e)}")
-        st.exception(e)  # This will show the full stack trace for debugging
 # ====================== DASHBOARD PAGES ======================
 def overview_page(data):
     st.header("🏠 Energy Overview")
@@ -1540,6 +1217,20 @@ def devices_page(df):
                 key="device_monthly_year"
             )
             
+            # Month range slider for monthly chart
+            month_names = ['January', 'February', 'March', 'April', 'May', 'June',
+                           'July', 'August', 'September', 'October', 'November', 'December']
+            slider_month_range = st.select_slider(
+                "Select month range to zoom",
+                options=month_names,
+                value=(month_names[0], month_names[11]),  # Default to January to December
+                key="device_tab1_month_slider"
+            )
+            
+            # Convert selected month names to month numbers
+            slider_start_month = month_names.index(slider_month_range[0]) + 1
+            slider_end_month = month_names.index(slider_month_range[1]) + 1
+            
             # Filter data by selected year
             year_mask = (df.index.year == selected_year)
             year_filtered_data = df.loc[year_mask]
@@ -1550,63 +1241,70 @@ def devices_page(df):
             if monthly_consumption.empty:
                 st.warning(f"No monthly data available for {selected_device} in {selected_year}")
             else:
-                fig_monthly = px.line(
-                    monthly_consumption.reset_index(),
-                    x=monthly_consumption.index.name or 'time',
-                    y=selected_device,
-                    title=f"{selected_device.replace(' [kW]', '')} Monthly Consumption - {selected_year}",
-                    labels={
-                        monthly_consumption.index.name or 'time': 'Month',
-                        selected_device: 'Consumption (kWh)'
-                    },
-                    markers=True
-                )
-
-                fig_monthly.update_traces(
-                    line=dict(width=3, color='#1f77b4'),
-                    marker=dict(size=8, color='#1f77b4')
-                )
-
-                fig_monthly.update_layout(
-                    xaxis_tickformat='%b',
-                    hovermode="x unified",
-                    yaxis_title="Consumption (kWh)",
-                    xaxis_title="Month",
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    height=500
-                )
-
-                # Add annotations for peak values
-                max_consump_idx = monthly_consumption[selected_device].idxmax()
-                max_consump_val = monthly_consumption[selected_device].max()
+                # Filter monthly consumption for slider month range
+                slider_month_mask = (monthly_consumption.index.month >= slider_start_month) & (monthly_consumption.index.month <= slider_end_month)
+                slider_monthly_data = monthly_consumption[slider_month_mask]
                 
-                fig_monthly.add_annotation(
-                    x=max_consump_idx,
-                    y=max_consump_val,
-                    text=f"Peak: {max_consump_val:.2f} kWh",
-                    showarrow=True,
-                    arrowhead=1,
-                    ax=0,
-                    ay=-40,
-                    bgcolor="white"
-                )
+                if slider_monthly_data.empty:
+                    st.warning(f"No data available for {selected_device} in selected month range")
+                else:
+                    fig_monthly = px.line(
+                        slider_monthly_data.reset_index(),
+                        x=slider_monthly_data.index.name or 'time',
+                        y=selected_device,
+                        title=f"{selected_device.replace(' [kW]', '')} Monthly Consumption - {month_names[slider_start_month-1]} to {month_names[slider_end_month-1]} {selected_year}",
+                        labels={
+                            slider_monthly_data.index.name or 'time': 'Month',
+                            selected_device: 'Consumption (kWh)'
+                        },
+                        markers=True
+                    )
 
-                # Add annotation for minimum value
-                min_consump_idx = monthly_consumption[selected_device].idxmin()
-                min_consump_val = monthly_consumption[selected_device].min()
-                
-                fig_monthly.add_annotation(
-                    x=min_consump_idx,
-                    y=min_consump_val,
-                    text=f"Min: {min_consump_val:.2f} kWh",
-                    showarrow=True,
-                    arrowhead=1,
-                    ax=0,
-                    ay=40,
-                    bgcolor="white"
-                )
+                    fig_monthly.update_traces(
+                        line=dict(width=3, color='#1f77b4'),
+                        marker=dict(size=8, color='#1f77b4')
+                    )
 
-                st.plotly_chart(fig_monthly, use_container_width=True)
+                    fig_monthly.update_layout(
+                        xaxis_tickformat='%b',
+                        hovermode="x unified",
+                        yaxis_title="Consumption (kWh)",
+                        xaxis_title="Month",
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        height=500
+                    )
+
+                    # Add annotations for peak values
+                    max_consump_idx = slider_monthly_data[selected_device].idxmax()
+                    max_consump_val = slider_monthly_data[selected_device].max()
+                    
+                    fig_monthly.add_annotation(
+                        x=max_consump_idx,
+                        y=max_consump_val,
+                        text=f"Peak: {max_consump_val:.2f} kWh",
+                        showarrow=True,
+                        arrowhead=1,
+                        ax=0,
+                        ay=-40,
+                        bgcolor="white"
+                    )
+
+                    # Add annotation for minimum value
+                    min_consump_idx = slider_monthly_data[selected_device].idxmin()
+                    min_consump_val = slider_monthly_data[selected_device].min()
+                    
+                    fig_monthly.add_annotation(
+                        x=min_consump_idx,
+                        y=min_consump_val,
+                        text=f"Min: {min_consump_val:.2f} kWh",
+                        showarrow=True,
+                        arrowhead=1,
+                        ax=0,
+                        ay=40,
+                        bgcolor="white"
+                    )
+
+                    st.plotly_chart(fig_monthly, use_container_width=True)
             
         except Exception as e:
             st.error(f"Error displaying device data: {str(e)}")
@@ -1913,6 +1611,690 @@ def devices_page(df):
         except Exception as e:
             st.error(f"Error processing correlation data: {str(e)}")
 
+def forecasting_page(df):
+    """
+    Page showing time series forecasting for daily energy consumption and a selected device's daily energy consumption.
+    """
+    st.header("📈 Energy Consumption Forecasting")
+    
+    if df is None:
+        st.warning("No data available")
+        return
+    
+    tab1, tab2 = st.tabs(["📈 Energy Usage & Generation Forecasting", "📈 Device Energy Consumption Forecasting"])
+    
+    with tab1:
+        st.markdown("")
+        # Get available date range
+        min_date = df.index.min().date()
+        max_date = df.index.max().date()
+
+        # Create date selection UI with calendar for historical data
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "From date",
+                min_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="energy_forecast_start_date",
+                format="DD/MM/YYYY"
+            )
+        with col2:
+            end_date = st.date_input(
+                "To date",
+                max_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="energy_forecast_end_date",
+                format="DD/MM/YYYY"
+            )
+
+        # Validate date range
+        if start_date > end_date:
+            st.error("End date must be after start date!")
+            st.stop()
+
+        # Energy metric selection
+        selected_metric = st.selectbox(
+            "Select energy metric to forecast",
+            ['use [kW]', 'gen [kW]'],
+            index=0,
+            key="energy_metric_select"
+        )
+
+        # Forecast horizon selection
+        forecast_horizon = st.selectbox(
+            "Select forecast horizon (days)",
+            [7, 14, 30],
+            index=0,
+            key="energy_forecast_horizon"
+        )
+
+        try:
+            # Filter data by date range
+            date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+            filtered_df = df.loc[date_mask]
+
+            # Calculate daily data for the selected metric
+            if selected_metric == 'use [kW]':
+                daily_data = calculate_daily_for_use(filtered_df, selected_metric)
+            else:  # gen [kW]
+                daily_data = calculate_daily_for_gen(filtered_df, selected_metric)
+            
+            if daily_data.empty:
+                st.warning(f"No data available for {selected_metric} from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
+                return
+
+            # Prepare data for forecasting
+            daily_data = daily_data.reset_index()
+            daily_data = daily_data.rename(columns={'time': 'ds', selected_metric: 'y'})
+            daily_data['ds'] = pd.to_datetime(daily_data['ds'])
+
+            # Remove duplicate dates and sort
+            daily_data = daily_data.drop_duplicates(subset=['ds'], keep='last').sort_values('ds')
+
+            # Create a complete date range and merge to fill missing dates
+            full_date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+            full_df = pd.DataFrame({'ds': full_date_range})
+            daily_data = full_df.merge(daily_data, on='ds', how='left')
+            
+            # Check for missing data and list missing dates
+            missing_dates = daily_data[daily_data['y'].isna()]['ds'].tolist()
+            missing_count = len(missing_dates)
+            if missing_count > 0:
+                st.info(f"Missing {missing_count} days ({(missing_count/len(full_date_range)*100):.1f}%): {[d.strftime('%d/%m/%Y') for d in missing_dates]}")
+                if missing_dates:
+                    missing_df = pd.DataFrame({'Missing Dates': [d.strftime('%d/%m/%Y') for d in missing_dates]})
+                    st.download_button(
+                        "Download Missing Dates",
+                        missing_df.to_csv(index=False).encode('utf-8'),
+                        "missing_dates_energy.csv",
+                        "text/csv"
+                    )
+            if missing_count > len(full_date_range) * 0.1:  # Warn if >10% missing
+                st.warning(f"Warning: {missing_count} days ({(missing_count/len(full_date_range)*100):.1f}%) are missing data. Results may be unreliable.")
+            
+            # Fill missing values with interpolation, fallback to forward/backward fill and zero
+            daily_data['y'] = daily_data['y'].interpolate(method='linear').fillna(method='ffill').fillna(method='bfill').fillna(0)
+
+            # Ensure sufficient data
+            if len(daily_data) < 30:
+                st.warning("Insufficient data for forecasting (minimum 30 days required)")
+                return
+
+            # Ensure last date matches end_date
+            if daily_data['ds'].max().date() != end_date:
+                st.warning(f"Data ends at {daily_data['ds'].max().date().strftime('%d/%m/%Y')}, not {end_date.strftime('%d/%m/%Y')}. Adjusting forecast start.")
+
+            # Prophet Forecasting
+            prophet_model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+            prophet_model.fit(daily_data[['ds', 'y']])
+
+            # Create future dataframe for Prophet
+            future_dates = prophet_model.make_future_dataframe(periods=forecast_horizon, freq='D')
+            prophet_forecast = prophet_model.predict(future_dates)
+            prophet_forecast = prophet_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+
+            # ARIMA Forecasting
+            arima_model = ARIMA(daily_data['y'], order=(5, 1, 0))
+            arima_results = arima_model.fit()
+            arima_forecast = arima_results.get_forecast(steps=forecast_horizon)
+            arima_mean = arima_forecast.predicted_mean
+            arima_conf_int = arima_forecast.conf_int(alpha=0.05)
+            
+            # Prepare ARIMA forecast dataframe
+            last_date = daily_data['ds'].max()
+            arima_dates = pd.date_range(start=last_date, periods=forecast_horizon + 1, freq='D')[1:]
+            forecast_arima = pd.DataFrame({
+                'ds': arima_dates,
+                'yhat': arima_mean.values,
+                'yhat_lower': arima_conf_int.iloc[:, 0].values,
+                'yhat_upper': arima_conf_int.iloc[:, 1].values
+            })
+            
+            # Set historical yhat, yhat_lower, yhat_upper to y for consistency
+            historical_arima = daily_data[['ds', 'y']].copy()
+            historical_arima['yhat'] = historical_arima['y']
+            historical_arima['yhat_lower'] = historical_arima['y']
+            historical_arima['yhat_upper'] = historical_arima['y']
+            
+            # Concatenate historical and forecast data
+            arima_forecast_df = pd.concat([historical_arima[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], forecast_arima], ignore_index=True)
+
+            # Combine historical and forecast data for visualization
+            historical_data = daily_data[['ds', 'y']].copy()
+            historical_data['type'] = 'Historical'
+            
+            prophet_data = prophet_forecast.copy()
+            prophet_data['type'] = 'Prophet Forecast'
+            prophet_data['y'] = prophet_data['yhat']
+            
+            arima_data = arima_forecast_df.copy()
+            arima_data['type'] = 'ARIMA Forecast'
+            arima_data['y'] = arima_data['yhat']
+
+            # Create combined dataframe for plotting
+            plot_data = pd.concat([
+                historical_data[['ds', 'y', 'type']],
+                prophet_data[['ds', 'y', 'type', 'yhat_lower', 'yhat_upper']],
+                arima_data[['ds', 'y', 'type', 'yhat_lower', 'yhat_upper']]
+            ], ignore_index=True)
+
+            # Add date range slider for zooming
+            plot_min_date = plot_data['ds'].min().date()
+            plot_max_date = plot_data['ds'].max().date()
+            slider_date_range = st.slider(
+                "Select date range to zoom",
+                min_value=plot_min_date,
+                max_value=plot_max_date,
+                value=(plot_min_date, plot_max_date),
+                format="DD/MM/YYYY",
+                key="energy_forecast_zoom_slider"
+            )
+            slider_start_date, slider_end_date = slider_date_range
+            plot_data = plot_data[(plot_data['ds'].dt.date >= slider_start_date) & (plot_data['ds'].dt.date <= slider_end_date)]
+
+            # Create line chart
+            fig = go.Figure()
+
+            # Historical data
+            historical_plot = plot_data[plot_data['type'] == 'Historical']
+            fig.add_trace(go.Scatter(
+                x=historical_plot['ds'],
+                y=historical_plot['y'],
+                mode='lines+markers',
+                name='Historical',
+                line=dict(color='#1f77b4', width=2),
+                marker=dict(size=6)
+            ))
+
+            # Prophet forecast
+            prophet_plot = plot_data[plot_data['type'] == 'Prophet Forecast']
+            fig.add_trace(go.Scatter(
+                x=prophet_plot['ds'],
+                y=prophet_plot['y'],
+                mode='lines',
+                name='Prophet Forecast',
+                line=dict(color='#ff7f0e', width=2, dash='dash')
+            ))
+            fig.add_trace(go.Scatter(
+                x=prophet_plot['ds'],
+                y=prophet_plot['yhat_upper'],
+                mode='lines',
+                name='Prophet Upper CI',
+                line=dict(color='rgba(255, 127, 14, 0.2)', width=0),
+                showlegend=False
+            ))
+            fig.add_trace(go.Scatter(
+                x=prophet_plot['ds'],
+                y=prophet_plot['yhat_lower'],
+                mode='lines',
+                name='Prophet Lower CI',
+                line=dict(color='rgba(255, 127, 14, 0.2)', width=0),
+                fill='tonexty',
+                fillcolor='rgba(255, 127, 14, 0.2)',
+                showlegend=False
+            ))
+
+            # ARIMA forecast
+            arima_plot = plot_data[plot_data['type'] == 'ARIMA Forecast']
+            fig.add_trace(go.Scatter(
+                x=arima_plot['ds'],
+                y=arima_plot['y'],
+                mode='lines',
+                name='ARIMA Forecast',
+                line=dict(color='#2ca02c', width=2, dash='dot')
+            ))
+            fig.add_trace(go.Scatter(
+                x=arima_plot['ds'],
+                y=arima_plot['yhat_upper'],
+                mode='lines',
+                name='ARIMA Upper CI',
+                line=dict(color='rgba(44, 160, 44, 0.2)', width=0),
+                showlegend=False
+            ))
+            fig.add_trace(go.Scatter(
+                x=arima_plot['ds'],
+                y=arima_plot['yhat_lower'],
+                mode='lines',
+                name='ARIMA Lower CI',
+                line=dict(color='rgba(44, 160, 44, 0.2)', width=0),
+                fill='tonexty',
+                fillcolor='rgba(44, 160, 44, 0.2)',
+                showlegend=False
+            ))
+
+            # Add vertical line for forecast start
+            forecast_start = daily_data['ds'].max()
+            all_y_values = []
+            for trace_data in [historical_plot, prophet_plot, arima_plot]:
+                if not trace_data.empty:
+                    all_y_values.extend(trace_data['y'].dropna().tolist())
+            
+            if all_y_values:
+                y_min = min(all_y_values)
+                y_max = max(all_y_values)
+                if forecast_start.date() >= slider_start_date and forecast_start.date() <= slider_end_date:
+                    fig.add_trace(go.Scatter(
+                        x=[forecast_start, forecast_start],
+                        y=[y_min, y_max],
+                        mode='lines',
+                        line=dict(color='gray', width=2, dash='dash'),
+                        name='Forecast Start',
+                        showlegend=False,
+                        hovertemplate='Forecast Start<br>Date: %{x}<extra></extra>'
+                    ))
+                    fig.add_annotation(
+                        x=forecast_start,
+                        y=y_max * 0.9,
+                        text="Forecast Start",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor="gray",
+                        bgcolor="white",
+                        bordercolor="gray",
+                        borderwidth=1
+                    )
+
+            # Update layout
+            fig.update_layout(
+                title=f"Daily Energy {selected_metric.replace(' [kW]', '')} Forecast",
+                xaxis_title="Date",
+                yaxis_title="Energy (kWh)",
+                hovermode="x unified",
+                plot_bgcolor='rgba(0,0,0,0)',
+                height=600,
+                xaxis=dict(
+                    tickformat='%d/%m/%Y',
+                    showgrid=True,
+                    gridcolor='lightgray'
+                ),
+                yaxis=dict(
+                    showgrid=True,
+                    gridcolor='lightgray'
+                ),
+                legend=dict(
+                    x=0.01,
+                    y=0.99,
+                    bgcolor='rgba(255,255,255,0.8)'
+                ),
+                margin=dict(t=80, b=80, l=80, r=80)
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Display forecast summary
+            st.subheader("📊 Forecast Summary")
+            forecast_only_prophet = prophet_forecast[prophet_forecast['ds'] > daily_data['ds'].max()]
+            forecast_only_arima = forecast_arima.copy()
+            
+            if not forecast_only_prophet.empty and not forecast_only_arima.empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Prophet Forecast**")
+                    prophet_avg = forecast_only_prophet['yhat'].mean()
+                    prophet_total = forecast_only_prophet['yhat'].sum()
+                    st.metric("Average Daily", f"{prophet_avg:.2f} kWh")
+                    st.metric("Total Period", f"{prophet_total:.2f} kWh")
+                with col2:
+                    st.markdown("**ARIMA Forecast**")
+                    arima_avg = forecast_only_arima['yhat'].mean()
+                    arima_total = forecast_only_arima['yhat'].sum()
+                    st.metric("Average Daily", f"{arima_avg:.2f} kWh")
+                    st.metric("Total Period", f"{arima_total:.2f} kWh")
+
+            # Expander with instructions
+            with st.expander("How to read the forecast chart"):
+                st.markdown("""
+                - **Historical Data**: Blue line shows actual daily energy for the selected metric.
+                - **Prophet Forecast**: Orange dashed line shows predicted energy using Facebook Prophet, with shaded confidence intervals.
+                - **ARIMA Forecast**: Green dotted line shows predicted energy using ARIMA, with shaded confidence intervals.
+                - **Forecast Start**: Gray vertical line marks the start of the forecast period (if within the selected range).
+                - **Hover**: View exact values and dates.
+                - **Zoom Slider**: Adjust the date range to focus on specific periods, including historical or forecast data.
+                - Adjust the date range, metric, and forecast horizon to explore different scenarios.
+                - Note: The visualization prioritizes clarity over prediction accuracy.
+                """)
+
+        except Exception as e:
+            st.error(f"Error in energy forecasting: {str(e)}")
+            st.exception(e)
+
+    with tab2:
+        st.markdown("")
+        # Get available date range
+        min_date = df.index.min().date()
+        max_date = df.index.max().date()
+
+        # Create date selection UI with calendar for historical data
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "From date",
+                min_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="device_forecast_start_date",
+                format="DD/MM/YYYY"
+            )
+        with col2:
+            end_date = st.date_input(
+                "To date",
+                max_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="device_forecast_end_date",
+                format="DD/MM/YYYY"
+            )
+
+        # Validate date range
+        if start_date > end_date:
+            st.error("End date must be after start date!")
+            st.stop()
+
+        # Device selection
+        selected_device = st.selectbox(
+            "Select a device to forecast",
+            NON_SOLAR_DEVICES,
+            index=0,
+            key="device_forecast_select"
+        )
+
+        # Forecast horizon selection
+        forecast_horizon = st.selectbox(
+            "Select forecast horizon (days)",
+            [7, 14, 30],
+            index=0,
+            key="device_forecast_horizon"
+        )
+
+        try:
+            # Filter data by date range
+            date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+            filtered_df = df.loc[date_mask]
+
+            # Calculate daily consumption for the selected device
+            daily_data = calculate_daily_for_device(filtered_df, selected_device)
+            
+            if daily_data.empty:
+                st.warning(f"No data available for {selected_device} from {start_date.strftime('%d/%m/%Y')} to {end_date.strftime('%d/%m/%Y')}")
+                return
+
+            # Prepare data for forecasting
+            daily_data = daily_data.reset_index()
+            daily_data = daily_data.rename(columns={'time': 'ds', selected_device: 'y'})
+            daily_data['ds'] = pd.to_datetime(daily_data['ds'])
+
+            # Remove duplicate dates and sort
+            daily_data = daily_data.drop_duplicates(subset=['ds'], keep='last').sort_values('ds')
+
+            # Create a complete date range and merge to fill missing dates
+            full_date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+            full_df = pd.DataFrame({'ds': full_date_range})
+            daily_data = full_df.merge(daily_data, on='ds', how='left')
+            
+            # Check for missing data and list missing dates
+            missing_dates = daily_data[daily_data['y'].isna()]['ds'].tolist()
+            missing_count = len(missing_dates)
+            if missing_count > 0:
+                st.info(f"Missing {missing_count} days ({(missing_count/len(full_date_range)*100):.1f}%): {[d.strftime('%d/%m/%Y') for d in missing_dates]}")
+                if missing_dates:
+                    missing_df = pd.DataFrame({'Missing Dates': [d.strftime('%d/%m/%Y') for d in missing_dates]})
+                    st.download_button(
+                        "Download Missing Dates",
+                        missing_df.to_csv(index=False).encode('utf-8'),
+                        "missing_dates_device.csv",
+                        "text/csv"
+                    )
+            if missing_count > len(full_date_range) * 0.1:  # Warn if >10% missing
+                st.warning(f"Warning: {missing_count} days ({(missing_count/len(full_date_range)*100):.1f}%) are missing data. Results may be unreliable.")
+            
+            # Fill missing values with interpolation, fallback to forward/backward fill and zero
+            daily_data['y'] = daily_data['y'].interpolate(method='linear').fillna(method='ffill').fillna(method='bfill').fillna(0)
+
+            # Ensure sufficient data
+            if len(daily_data) < 30:
+                st.warning("Insufficient data for forecasting (minimum 30 days required)")
+                return
+
+            # Ensure last date matches end_date
+            if daily_data['ds'].max().date() != end_date:
+                st.warning(f"Data ends at {daily_data['ds'].max().date().strftime('%d/%m/%Y')}, not {end_date.strftime('%d/%m/%Y')}. Adjusting forecast start.")
+
+            # Prophet Forecasting
+            prophet_model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+            prophet_model.fit(daily_data[['ds', 'y']])
+
+            # Create future dataframe for Prophet
+            future_dates = prophet_model.make_future_dataframe(periods=forecast_horizon, freq='D')
+            prophet_forecast = prophet_model.predict(future_dates)
+            prophet_forecast = prophet_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+
+            # ARIMA Forecasting
+            arima_model = ARIMA(daily_data['y'], order=(5, 1, 0))
+            arima_results = arima_model.fit()
+            arima_forecast = arima_results.get_forecast(steps=forecast_horizon)
+            arima_mean = arima_forecast.predicted_mean
+            arima_conf_int = arima_forecast.conf_int(alpha=0.05)
+            
+            # Prepare ARIMA forecast dataframe
+            last_date = daily_data['ds'].max()
+            arima_dates = pd.date_range(start=last_date, periods=forecast_horizon + 1, freq='D')[1:]
+            forecast_arima = pd.DataFrame({
+                'ds': arima_dates,
+                'yhat': arima_mean.values,
+                'yhat_lower': arima_conf_int.iloc[:, 0].values,
+                'yhat_upper': arima_conf_int.iloc[:, 1].values
+            })
+            
+            # Set historical yhat, yhat_lower, yhat_upper to y for consistency
+            historical_arima = daily_data[['ds', 'y']].copy()
+            historical_arima['yhat'] = historical_arima['y']
+            historical_arima['yhat_lower'] = historical_arima['y']
+            historical_arima['yhat_upper'] = historical_arima['y']
+            
+            # Concatenate historical and forecast data
+            arima_forecast_df = pd.concat([historical_arima[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], forecast_arima], ignore_index=True)
+
+            # Combine historical and forecast data for visualization
+            historical_data = daily_data[['ds', 'y']].copy()
+            historical_data['type'] = 'Historical'
+            
+            prophet_data = prophet_forecast.copy()
+            prophet_data['type'] = 'Prophet Forecast'
+            prophet_data['y'] = prophet_data['yhat']
+            
+            arima_data = arima_forecast_df.copy()
+            arima_data['type'] = 'ARIMA Forecast'
+            arima_data['y'] = arima_data['yhat']
+
+            # Create combined dataframe for plotting
+            plot_data = pd.concat([
+                historical_data[['ds', 'y', 'type']],
+                prophet_data[['ds', 'y', 'type', 'yhat_lower', 'yhat_upper']],
+                arima_data[['ds', 'y', 'type', 'yhat_lower', 'yhat_upper']]
+            ], ignore_index=True)
+
+            # Add date range slider for zooming
+            plot_min_date = plot_data['ds'].min().date()
+            plot_max_date = plot_data['ds'].max().date()
+            slider_date_range = st.slider(
+                "Select date range to zoom",
+                min_value=plot_min_date,
+                max_value=plot_max_date,
+                value=(plot_min_date, plot_max_date),
+                format="DD/MM/YYYY",
+                key="device_forecast_zoom_slider"
+            )
+            slider_start_date, slider_end_date = slider_date_range
+            plot_data = plot_data[(plot_data['ds'].dt.date >= slider_start_date) & (plot_data['ds'].dt.date <= slider_end_date)]
+
+            # Create line chart
+            fig = go.Figure()
+
+            # Historical data
+            historical_plot = plot_data[plot_data['type'] == 'Historical']
+            fig.add_trace(go.Scatter(
+                x=historical_plot['ds'],
+                y=historical_plot['y'],
+                mode='lines+markers',
+                name='Historical',
+                line=dict(color='#1f77b4', width=2),
+                marker=dict(size=6)
+            ))
+
+            # Prophet forecast
+            prophet_plot = plot_data[plot_data['type'] == 'Prophet Forecast']
+            fig.add_trace(go.Scatter(
+                x=prophet_plot['ds'],
+                y=prophet_plot['y'],
+                mode='lines',
+                name='Prophet Forecast',
+                line=dict(color='#ff7f0e', width=2, dash='dash')
+            ))
+            fig.add_trace(go.Scatter(
+                x=prophet_plot['ds'],
+                y=prophet_plot['yhat_upper'],
+                mode='lines',
+                name='Prophet Upper CI',
+                line=dict(color='rgba(255, 127, 14, 0.2)', width=0),
+                showlegend=False
+            ))
+            fig.add_trace(go.Scatter(
+                x=prophet_plot['ds'],
+                y=prophet_plot['yhat_lower'],
+                mode='lines',
+                name='Prophet Lower CI',
+                line=dict(color='rgba(255, 127, 14, 0.2)', width=0),
+                fill='tonexty',
+                fillcolor='rgba(255, 127, 14, 0.2)',
+                showlegend=False
+            ))
+
+            # ARIMA forecast
+            arima_plot = plot_data[plot_data['type'] == 'ARIMA Forecast']
+            fig.add_trace(go.Scatter(
+                x=arima_plot['ds'],
+                y=arima_plot['y'],
+                mode='lines',
+                name='ARIMA Forecast',
+                line=dict(color='#2ca02c', width=2, dash='dot')
+            ))
+            fig.add_trace(go.Scatter(
+                x=arima_plot['ds'],
+                y=arima_plot['yhat_upper'],
+                mode='lines',
+                name='ARIMA Upper CI',
+                line=dict(color='rgba(44, 160, 44, 0.2)', width=0),
+                showlegend=False
+            ))
+            fig.add_trace(go.Scatter(
+                x=arima_plot['ds'],
+                y=arima_plot['yhat_lower'],
+                mode='lines',
+                name='ARIMA Lower CI',
+                line=dict(color='rgba(44, 160, 44, 0.2)', width=0),
+                fill='tonexty',
+                fillcolor='rgba(44, 160, 44, 0.2)',
+                showlegend=False
+            ))
+
+            # Add vertical line for forecast start
+            forecast_start = daily_data['ds'].max()
+            all_y_values = []
+            for trace_data in [historical_plot, prophet_plot, arima_plot]:
+                if not trace_data.empty:
+                    all_y_values.extend(trace_data['y'].dropna().tolist())
+            
+            if all_y_values:
+                y_min = min(all_y_values)
+                y_max = max(all_y_values)
+                if forecast_start.date() >= slider_start_date and forecast_start.date() <= slider_end_date:
+                    fig.add_trace(go.Scatter(
+                        x=[forecast_start, forecast_start],
+                        y=[y_min, y_max],
+                        mode='lines',
+                        line=dict(color='gray', width=2, dash='dash'),
+                        name='Forecast Start',
+                        showlegend=False,
+                        hovertemplate='Forecast Start<br>Date: %{x}<extra></extra>'
+                    ))
+                    fig.add_annotation(
+                        x=forecast_start,
+                        y=y_max * 0.9,
+                        text="Forecast Start",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowcolor="gray",
+                        bgcolor="white",
+                        bordercolor="gray",
+                        borderwidth=1
+                    )
+
+            # Update layout
+            fig.update_layout(
+                title=f"Daily Energy Consumption Forecast for {selected_device.replace(' [kW]', '')}",
+                xaxis_title="Date",
+                yaxis_title="Consumption (kWh)",
+                hovermode="x unified",
+                plot_bgcolor='rgba(0,0,0,0)',
+                height=600,
+                xaxis=dict(
+                    tickformat='%d/%m/%Y',
+                    showgrid=True,
+                    gridcolor='lightgray'
+                ),
+                yaxis=dict(
+                    showgrid=True,
+                    gridcolor='lightgray'
+                ),
+                legend=dict(
+                    x=0.01,
+                    y=0.99,
+                    bgcolor='rgba(255,255,255,0.8)'
+                ),
+                margin=dict(t=80, b=80, l=80, r=80)
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Display forecast summary
+            st.subheader("📊 Forecast Summary")
+            forecast_only_prophet = prophet_forecast[prophet_forecast['ds'] > daily_data['ds'].max()]
+            forecast_only_arima = forecast_arima.copy()
+            
+            if not forecast_only_prophet.empty and not forecast_only_arima.empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Prophet Forecast**")
+                    prophet_avg = forecast_only_prophet['yhat'].mean()
+                    prophet_total = forecast_only_prophet['yhat'].sum()
+                    st.metric("Average Daily", f"{prophet_avg:.2f} kWh")
+                    st.metric("Total Period", f"{prophet_total:.2f} kWh")
+                with col2:
+                    st.markdown("**ARIMA Forecast**")
+                    arima_avg = forecast_only_arima['yhat'].mean()
+                    arima_total = forecast_only_arima['yhat'].sum()
+                    st.metric("Average Daily", f"{arima_avg:.2f} kWh")
+                    st.metric("Total Period", f"{arima_total:.2f} kWh")
+
+            # Expander with instructions
+            with st.expander("How to read the forecast chart"):
+                st.markdown("""
+                - **Historical Data**: Blue line shows actual daily consumption for the selected device.
+                - **Prophet Forecast**: Orange dashed line shows predicted consumption using Facebook Prophet, with shaded confidence intervals.
+                - **ARIMA Forecast**: Green dotted line shows predicted consumption using ARIMA, with shaded confidence intervals.
+                - **Forecast Start**: Gray vertical line marks the start of the forecast period (if within the selected range).
+                - **Hover**: View exact values and dates.
+                - **Zoom Slider**: Adjust the date range to focus on specific periods, including historical or forecast data.
+                - Adjust the date range, device, and forecast horizon to explore different scenarios.
+                - Note: The visualization prioritizes clarity over prediction accuracy.
+                """)
+
+        except Exception as e:
+            st.error(f"Error in device forecasting: {str(e)}")
+            st.exception(e)
 
 def weather_page(df):
     """
@@ -2247,7 +2629,7 @@ def main():
         st.title("🏠 Navigation")
         page = st.radio(
             "Select page",
-            ["🏠 Overview", "🔌 Devices", "🌤️ Weather", "📈 Forecasting"],
+            ["🏠 Overview", "🔌 Devices", "📈 Forecasting", "🌤️ Weather"],
             index=0
         )
         
@@ -2284,10 +2666,11 @@ def main():
             overview_page(processed_df)
         elif page == "🔌 Devices":
             devices_page(processed_df)
-        elif page == "🌤️ Weather":
-            weather_page(processed_df)
         elif page == "📈 Forecasting":
             forecasting_page(processed_df)
+        elif page == "🌤️ Weather":
+            weather_page(processed_df)
+
     else:
         st.error("Failed to load data. Please check data file and try again.")
 if __name__ == "__main__":
