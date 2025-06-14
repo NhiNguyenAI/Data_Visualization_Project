@@ -32,44 +32,31 @@ WEATHER = [
 @st.cache_data
 def load_data():
     """
-    Load and preprocess the energy consumption data from CSV file.
-    
-    Returns:
-        pd.DataFrame: Processed dataframe with datetime index
-        None: If error occurs during loading
+    Load and preprocess the energy data assuming 1-minute resolution
+    and override incorrect timestamps with correct time index.
     """
     try:
-        # Path to data file (adjust as needed)
         file_path = os.path.join("data", "HomeC.csv")
-        
-        # Read data
-        data = pd.read_csv(file_path, low_memory=False)
-        
-        # Data cleaning
-        data = data[:-1]  # Remove last row if it contains NaN
-        
-        # Convert time column - handle errors if any
-        if 'time' in data.columns:
-            try:
-                # Try converting from Unix timestamp
-                data['datetime'] = pd.to_datetime(data['time'], unit='s', errors='coerce')
-                
-                # If unsuccessful, try direct conversion
-                if data['datetime'].isnull().any():
-                    data['datetime'] = pd.to_datetime(data['time'], errors='coerce')
-                
-                # Set datetime as index
-                data = data.set_index('datetime')
-                data = data.sort_index()
-                
-            except Exception as e:
-                st.error(f"Time conversion error: {str(e)}")
-                # Create sample timeline if needed
-                data['datetime'] = pd.date_range(start='2016-01-01', periods=len(data), freq='min')
-                data = data.set_index('datetime')
-        
-        return data.dropna()
-    
+        df = pd.read_csv(file_path, low_memory=False)
+        df = df[:-1]  # optional: remove last row if invalid
+
+        # Override timestamp with correct 1-minute spacing
+        df['time'] = pd.date_range(start='2016-01-01 05:00', periods=len(df), freq='min')
+
+        # Set datetime index
+        df = df.set_index('time')
+
+        # Optional: extract time features
+        df['year'] = df.index.year
+        df['month'] = df.index.month
+        df['day'] = df.index.day
+        df['weekday'] = df.index.day_name()
+        df['weekofyear'] = df.index.isocalendar().week
+        df['hour'] = df.index.hour
+        df['minute'] = df.index.minute
+
+        return df
+
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         return None
@@ -159,6 +146,42 @@ def calculate_daily_for_device(df, device_col):
     # Resample to daily sum and convert from kW to kWh
     return df[[device_col]].resample('D').sum() / 60
 
+def show_weather_metrics(df, cols):
+    metrics = [
+        ('temperature', '🌡️ Avg Temp', '°C'),
+        ('apparentTemperature', '🌡️ Feels Like', '°C'),
+        ('humidity', '💧 Humidity', '%'),
+        ('windSpeed', '🌬️ Wind Speed', 'km/h'),
+        ('pressure', '⏲️ Pressure', 'hPa')
+    ]
+    valid = [(c, n, u) for c, n, u in metrics if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+    
+    for i, (col, name, unit) in enumerate(valid[:len(cols)]):
+        try:
+            avg = df[col].mean()
+            min_val = df[col].min()
+            max_val = df[col].max()
+            delta = f"{min_val:.1f}{unit} → {max_val:.1f}{unit}"  
+            with cols[i]:
+                st.metric(name, f"{avg:.1f}{unit}", delta)
+        except Exception as e:
+            st.error(f"Error: {name} – {str(e)}")
+
+
+def plot_temp_bins(df, power_col):
+    bins = pd.cut(df['temperature'], bins=10)
+    grouped = df.groupby(bins)[power_col].mean().reset_index()
+    grouped['Range'] = grouped['temperature'].apply(lambda x: f"{x.left:.1f}°C to {x.right:.1f}°C")
+    fig = px.bar(grouped, x='Range', y=power_col, title='Avg Consumption by Temperature Range')
+    fig.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig, use_container_width=True)
+
+def scatter_temp_vs_power(df, power_col):
+    sample = df.sample(min(1000, len(df)))
+    fig = px.scatter(sample, x='temperature', y=power_col, color='hour',
+                     trendline='lowess', title='Temperature vs Consumption')
+    st.plotly_chart(fig, use_container_width=True)
+
 @st.cache_data
 def process_data(_df):
     """
@@ -177,6 +200,10 @@ def process_data(_df):
     df = _df.copy()
     
     try:
+        # Remove invalid rows
+        df['cloudCover'].replace(['cloudCover'], method='bfill', inplace=True)
+        df['cloudCover'] = df['cloudCover'].astype('float')
+
         # Add time-based features
         df['date'] = df.index.date
         df['hour'] = df.index.hour
@@ -273,91 +300,9 @@ def overview_page(data):
         st.error("Column 'use [kW]' not found in data")
         return
     
-    # ========== HEATMAP SECTION ==========
-    st.subheader("🌡️ Hourly Energy Consumption Patterns")
-    
-    # Prepare heatmap data
-    heatmap_data = data.copy()
-    heatmap_data['hour'] = heatmap_data.index.hour
-    heatmap_data['date'] = heatmap_data.index.date
-    heatmap_data['day_month'] = heatmap_data.index.strftime('%d/%m')  # Date format DD/MM
-    
-    # Get unique dates and limit to 30 most recent if needed
-    unique_dates = sorted(heatmap_data['date'].unique(), reverse=True)
-    display_dates = unique_dates[:30]  # Take most recent 30 days
-    heatmap_filtered = heatmap_data[heatmap_data['date'].isin(display_dates)]
-    
-    # Create pivot table - using day_month for display while keeping date for sorting
-    heatmap_pivot = heatmap_filtered.pivot_table(
-        index=['date', 'day_month'],  # Store both for sorting and display
-        columns='hour',
-        values='use [kW]',
-        aggfunc='mean'
-    )
-    
-    # Sort by date (newest first) but display day_month
-    heatmap_pivot = heatmap_pivot.sort_index(level='date', ascending=False)
-    
-    # Create heatmap with proper date display
-    fig_heatmap = px.imshow(
-        heatmap_pivot,
-        labels=dict(x="Hour of Day", y="Date", color="Energy Usage (kW)"),
-        x=heatmap_pivot.columns,
-        y=heatmap_pivot.index.get_level_values('day_month'),  # Use formatted dates for display
-        color_continuous_scale=[
-        "#fff7bc",  
-        "#fee391",
-        "#fec44f",
-        "#fe9929",
-        "#ec7014",
-        "#cc4c02",
-        "#993404",
-        "#662506"   
-        ],
-        aspect="auto",
-        height=600 + (len(heatmap_pivot) * 3)
-    )
-    
-    # Customize heatmap appearance
-    fig_heatmap.update_layout(
-        title={
-            'text': "<b>Daily Energy Consumption Patterns by Hour</b>",
-            'y':0.95,
-            'x':0.5,
-            'xanchor': 'center',
-            'yanchor': 'top',
-            'font': {'size': 18}
-        },
-        xaxis_title="<b>Hour of Day</b>",
-        yaxis_title="<b>Date</b>",
-        margin=dict(l=50, r=50, b=100, t=100),
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        font=dict(family="Arial", size=12)
-    )
-    
-    # Configure axes
-    fig_heatmap.update_xaxes(
-        tickmode='array',
-        tickvals=list(range(0, 24, 2)),
-        ticktext=[f"{h:02d}:00" for h in range(0, 24, 2)],
-        showgrid=True,
-        gridcolor='rgba(200,200,200,0.2)',
-        tickfont=dict(size=10)
-    )
-    
-    fig_heatmap.update_yaxes(
-        tickmode='array',
-        tickvals=list(range(len(heatmap_pivot))),
-        ticktext=heatmap_pivot.index.get_level_values('day_month'),
-        tickfont=dict(size=10),
-        automargin=True
-    )
-    
-    # Display the heatmap
-    st.plotly_chart(fig_heatmap, use_container_width=True)
 
     # ========== REST OF OVERVIEW PAGE ==========
+
     start_date = data.index.min().date()
     end_date = data.index.max().date()
     
@@ -373,6 +318,161 @@ def overview_page(data):
         hourly_energy_use = calculate_hourly_for_use(filtered)           
         hourly_data_gen = calculate_hourly_for_gen(filtered)
         
+        # ========== WEEKLY HEATMAP ==========
+        st.subheader("Weekly Energy Consumption Heatmap (kWh/day)")
+
+        # Calculate daily energy consumption in kWh
+        daily_kwh = data['use [kW]'].resample('D').sum() / 60  # Convert kW to kWh
+        daily_kwh = daily_kwh.to_frame(name='kWh')
+
+        # Extract time features
+        daily_kwh['week'] = daily_kwh.index.isocalendar().week
+        daily_kwh['weekday'] = daily_kwh.index.weekday
+        daily_kwh['year'] = daily_kwh.index.year
+        daily_kwh['month'] = daily_kwh.index.month
+        daily_kwh['date'] = daily_kwh.index
+
+        # Year selection
+        selected_year = st.selectbox("Select Year", sorted(daily_kwh['year'].unique(), reverse=True))
+        yearly_data = daily_kwh[daily_kwh['year'] == selected_year]
+
+        # Function to determine the dominant month for a week
+        def get_week_month(week, year):
+            # Find the first day of the given week
+            first_day = pd.to_datetime(f"{year}-W{week}-1", format="%Y-W%W-%w")
+            # Get all days in the week
+            week_days = pd.date_range(start=first_day, periods=7, freq='D')
+            # Count days per month
+            month_counts = week_days.month.value_counts()
+            # Return the month with the most days
+            dominant_month = month_counts.idxmax()
+            month_name = pd.to_datetime(f"{year}-{dominant_month}-01").strftime("%B")
+            return month_name
+
+        # Function to get the specific date for a week and weekday
+        def get_specific_date(week, weekday, year):
+            try:
+                # Find the first day (Monday) of the given week
+                first_day = pd.to_datetime(f"{year}-W{week}-1", format="%Y-W%W-%w")
+                # Add the weekday offset (0=Monday, ..., 6=Sunday)
+                specific_date = first_day + pd.Timedelta(days=weekday)
+                return specific_date.strftime("%d/%m/%Y")
+            except ValueError:
+                return "Unknown"
+
+        # Assign month labels to weeks
+        yearly_data['month_label'] = yearly_data['week'].apply(lambda w: get_week_month(w, selected_year))
+
+        # Pivot table for heatmap: weekdays as rows, weeks as columns
+        heatmap_pivot = yearly_data.pivot_table(
+            index='weekday',
+            columns='week',
+            values='kWh',
+            aggfunc='mean'
+        )
+
+        # Rename index to full English weekday names
+        weekday_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        heatmap_pivot.index = weekday_names
+
+        # Ensure all weeks (1-53) are present, filling missing weeks with NaN
+        all_weeks = pd.DataFrame(columns=range(1, 54))
+        heatmap_pivot = heatmap_pivot.reindex(columns=all_weeks.columns, fill_value=np.nan)
+
+        # Create custom x-axis tick labels (month names)
+        week_to_month = yearly_data.groupby('week')['month_label'].first().reindex(range(1, 54), fill_value='Unknown')
+        month_labels = week_to_month.values
+        # Only show month names when they change for clarity
+        display_labels = []
+        last_month = None
+        for i, month in enumerate(month_labels):
+            if month != last_month and month != 'Unknown':
+                display_labels.append(month)
+                last_month = month
+            else:
+                display_labels.append('')
+
+        # Create custom hover data with specific dates
+        hover_data = np.empty_like(heatmap_pivot, dtype=object)
+        for i, weekday in enumerate(range(7)):  # 0=Monday, ..., 6=Sunday
+            for j, week in enumerate(range(1, 54)):
+                date_str = get_specific_date(week, weekday, selected_year)
+                kwh = heatmap_pivot.iloc[i, j] if not pd.isna(heatmap_pivot.iloc[i, j]) else "No data"
+                hover_data[i, j] = f"Date: {date_str}<br>Week: {week}<br>Day: {weekday_names[i]}<br>Energy: {kwh:.2f} kWh" if kwh != "No data" else f"Date: {date_str}<br>Week: {week}<br>Day: {weekday_names[i]}<br>Energy: No data"
+
+        # Create heatmap with Plotly
+        fig = px.imshow(
+            heatmap_pivot,
+            labels=dict(x="Week (by Month)", y="Day of Week", color="Energy (kWh)"),
+            color_continuous_scale=[
+                [0.0, "#138413"],  # Low energy: green
+                [0.3, "#F9FBF9"],  # Mid: light gray
+                [0.6, "#FF9800"],  # High: orange
+                [1.0, "#E53935"]   # Very high: red
+            ],
+            aspect="auto"
+        )
+
+        # Update layout for balanced cells and better appearance
+        fig.update_layout(
+            title=f"<b>Weekly Energy Consumption - {selected_year}</b>",
+            xaxis_title="<b>Week (by Month)</b>",
+            yaxis_title="<b>Day of Week</b>",
+            height=500,  # Adjusted height for 7 rows (days)
+            width=1200,  # Wider width for 53 columns (weeks)
+            margin=dict(l=100, r=80, b=80, t=80),
+            xaxis=dict(
+                tickmode='array',
+                tickvals=list(range(53)),
+                ticktext=display_labels,
+                tickangle=45,
+                side="top",
+                showgrid=False,
+                title_standoff=10
+            ),
+            yaxis=dict(
+                tickmode='array',
+                tickvals=list(range(7)),
+                ticktext=weekday_names,
+                autorange="reversed",  # Monday at the top
+                showgrid=False,
+                title_standoff=10
+            ),
+            coloraxis_colorbar=dict(
+                title="kWh",
+                thickness=15,
+                len=0.5,
+                yanchor="middle",
+                y=0.5
+            )
+        )
+
+        # Ensure balanced cell sizes and add custom hover data
+        fig.update_traces(
+            xgap=2,  # Small gap between cells for clarity
+            ygap=2,
+            zmin=0,  # Minimum energy value for color scaling
+            zmax=yearly_data['kWh'].max() if not yearly_data['kWh'].empty else 1,  # Max energy for scaling
+            customdata=hover_data,
+            hovertemplate="%{customdata}<extra></extra>"
+        )
+
+        # Display the heatmap
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Expander with instructions
+        with st.expander("How to read this heatmap"):
+            st.markdown("""
+            - **Columns**: Weeks of the year, labeled by the dominant month (e.g., January, February).
+            - **Rows**: Days of the week (Monday to Sunday).
+            - **Color intensity**: Daily energy consumption in kWh.
+            - **Darker colors**: Higher energy consumption.
+            - Hover over cells to see the specific date, week number, day, and energy value.
+            - Missing data appears as empty cells.
+            - Only the first week of each month is labeled for clarity.
+            """)
+
+
         tab1, tab2 = st.tabs(["DAILY ENERGY CONSUMPTION & GENERATION", "ENERGY SUMMARY BY DAY"])
 
         with tab1:
@@ -639,6 +739,7 @@ def overview_page(data):
                 
             except Exception as e:
                 st.error(f"Data processing error: {str(e)}") 
+
     except Exception as e:
         st.error(f"Error occurred: {str(e)}")
         st.stop()
@@ -732,15 +833,15 @@ def devices_page(df):
             if not daily_consumption.empty:
                 fig = px.line(
                     daily_consumption.reset_index(),
-                    x='datetime',
+                    x=daily_consumption.index.name or 'index',  # fallback if unnamed
                     y=selected_device,
                     title=f"{selected_device.replace(' [kW]', '')} Daily Consumption",
                     labels={
-                        'datetime': 'Date',
+                        daily_consumption.index.name or 'index': 'Date',
                         selected_device: 'Consumption (kWh)'
                     },
                     markers=True
-                )
+)
 
                 fig.update_traces(
                     line=dict(width=3, color='#1f77b4'),
@@ -928,244 +1029,324 @@ def devices_page(df):
 
 def weather_page(df):
     """
-    Enhanced page showing weather impact on energy consumption with more insights.
-    
-    Args:
-        df (pd.DataFrame): Processed energy data with weather info
+    Weather Impact Analysis:
+    Displays how weather metrics relate to energy usage patterns.
     """
-    st.header("🌤 Weather Impact Analysis")
-    
+    st.header("🌤️ Weather Impact Analysis")
+
     if df is None:
         st.warning("No data available")
         return
-    
-    # Ensure 'date' column exists
-    if 'date' not in df.columns:
-        st.error("Dataframe is missing 'date' column")
-        return
-    
-    # Date filtering
-    date_range = date_filter(df, "weather")
-    if date_range is None or len(date_range) < 2:
-        st.error("Invalid date range selected")
-        return
-        
-    filtered_df = df[(df['date'] >= date_range[0]) & (df['date'] <= date_range[1])].copy()
-    filtered_df['date'] = pd.to_datetime(filtered_df['date'])
-    
-    # Separate numeric and non-numeric columns
-    numeric_cols = filtered_df.select_dtypes(include=['number']).columns.tolist()
-    non_numeric_cols = [col for col in filtered_df.columns if col not in numeric_cols and col != 'date']
-    
-    # Create hourly aggregates - handle numeric and non-numeric separately
-    if len(numeric_cols) > 0:
-        # Resample numeric columns with mean
-        hourly_numeric = filtered_df.set_index('date')[numeric_cols].resample('H').mean()
-        
-        # Resample non-numeric columns with first observation if they exist
-        if non_numeric_cols:
-            hourly_non_numeric = filtered_df.set_index('date')[non_numeric_cols].resample('H').first()
-            hourly_df = pd.concat([hourly_numeric, hourly_non_numeric], axis=1)
-        else:
-            hourly_df = hourly_numeric
-        
-        hourly_df = hourly_df.reset_index()
-    else:
-        hourly_df = filtered_df.copy()
-    
-    # Weather summary metrics
-    st.subheader("Weather Summary")
-    cols = st.columns(5)
-    weather_metrics = [
-        ('temperature', '🌡 Avg Temp', '°C'),
-        ('apparentTemperature', '🌡 Feels Like', '°C'),
-        ('humidity', '💧 Humidity', '%'),
-        ('windSpeed', '🌬 Wind Speed', 'km/h'),
-        ('pressure', '⏲ Pressure', 'hPa')
-    ]
-    
-    # Filter to only include valid numeric metrics
-    valid_metrics = [(col, name, unit) for col, name, unit in weather_metrics 
-                    if col in filtered_df.columns and pd.api.types.is_numeric_dtype(filtered_df[col])]
-    
-    for i, (col, name, unit) in enumerate(valid_metrics):
-        with cols[i]:
-            try:
-                avg_value = filtered_df[col].mean()
-                delta = f"{filtered_df[col].max() - filtered_df[col].min():.1f}{unit} range"
-                st.metric(name, f"{avg_value:.1f}{unit}", delta)
-            except Exception as e:
-                st.error(f"Error calculating {name}: {str(e)}")
-    
+
     st.markdown("---")
-    
-    # Main tabs
-    tab1, tab2, tab3 = st.tabs(["📈 Weather Trends", "🔍 Energy Relationships", "🌦 Weather Conditions"])
-    
+    tab1, tab2, tab3 = st.tabs(["📈 Weather Trends", "🔍 Energy Relationships", "📊 Advanced Insights"])
+
+    # ========== TAB 1: WEATHER TRENDS ==========
     with tab1:
-            col1, col2 = st.columns(2)
-            with col1:
-                # Get only numeric columns that exist in the dataframe
-                available_numeric_cols = filtered_df.select_dtypes(include=['number']).columns.tolist()
-                temp_cols = [c for c in ['temperature', 'apparentTemperature', 'dewPoint'] 
-                            if c in available_numeric_cols]
-                
-                if temp_cols:
-                    hourly = filtered_df.groupby('hour')[temp_cols].mean().reset_index()
-                    fig = px.bar(
-                        hourly.melt(id_vars='hour'), 
-                        x='hour', 
-                        y='value',
-                        color='variable',
-                        barmode='group',
-                        title='Hourly Temperature Averages',
-                        labels={'hour': 'Hour of Day', 'value': 'Temperature (°C)'},
-                        color_discrete_map={
-                            'temperature': '#EF553B',
-                            'apparentTemperature': '#AB63FA',
-                            'dewPoint': '#00CC96'
-                        }
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("No numeric temperature data available for plotting")
-                    st.write("Available numeric columns:", available_numeric_cols)
-            
-            with col2:
-                if all(c in filtered_df.columns for c in ['hour', 'temperature', 'use [kW]']):
-                    heatmap_df = filtered_df.copy()
-                    # Ensure we're using numeric columns only
-                    heatmap_df = heatmap_df[['hour', 'temperature', 'use [kW]']].dropna()
-                    
-                    fig = px.density_heatmap(
-                        heatmap_df,
-                        x='hour',
-                        y='temperature',
-                        z='use [kW]',
-                        histfunc='avg',
-                        title='Temperature by Hour with Energy Usage',
-                        labels={'hour': 'Hour of Day', 'temperature': 'Temperature (°C)'},
-                        nbinsx=24, 
-                        nbinsy=20
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("Required columns missing for heatmap")
-    
+        st.subheader("📈 Weather & Energy Trends")
+
+        # Ensure datetime info is available
+        df['date'] = df.index.date
+        df['hour'] = df.index.hour
+        df['weekday'] = df.index.day_name()
+
+        mode = st.radio("Select Time Range", ["Full Year", "Custom Range"], horizontal=True)
+
+        if mode == "Custom Range":
+            date_range = date_filter(df, "weather_range")
+            if not date_range or len(date_range) < 2:
+                st.error("Please select a valid time range.")
+                return
+            filtered_df = df[(df.index.date >= date_range[0]) & (df.index.date <= date_range[1])].copy()
+        else:
+            filtered_df = df.copy()
+
+        # General Weather Summary (keep this section)
+        st.subheader("Weather Summary")
+        show_weather_metrics(filtered_df, st.columns(5))
+
+        # Aggregation level
+        level = st.radio("📊 Compare by", ["Day", "Month"], horizontal=True)
+
+        # Popular weather variables
+        weather_options = {
+            'temperature': 'Temperature (°C)',
+            'apparentTemperature': 'Apparent Temperature (°C)',
+            'humidity': 'Humidity (%)',
+            'pressure': 'Pressure (hPa)',
+            'windSpeed': 'Wind Speed (km/h)',
+            'dewPoint': 'Dew Point (°C)'
+        }
+
+        # Select weather variable
+        available_weather_cols = [col for col in weather_options if col in filtered_df.columns]
+        selected_weather = st.selectbox(
+            "🌦️ Select weather variable to compare",
+            available_weather_cols,
+            format_func=lambda x: weather_options[x]
+        )
+
+        if level == "Day":
+            daily = filtered_df.resample('D').mean(numeric_only=True)
+
+            import plotly.graph_objects as go
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(
+                x=daily.index,
+                y=daily['use [kW]'],
+                name='Energy Usage (kWh)',
+                mode='lines+markers',
+                yaxis='y1'
+            ))
+
+            if selected_weather in daily.columns:
+                fig.add_trace(go.Scatter(
+                    x=daily.index,
+                    y=daily[selected_weather],
+                    name=weather_options[selected_weather],
+                    mode='lines+markers',
+                    yaxis='y2',
+                    line=dict(color='orange')
+                ))
+
+            fig.update_layout(
+                title="Daily Energy Usage and Weather Variable",
+                xaxis_title="Date",
+                yaxis=dict(
+                    title="Energy Usage (kWh)",
+                    titlefont=dict(color="#1f77b4"),
+                    tickfont=dict(color="#1f77b4")
+                ),
+                yaxis2=dict(
+                    title=weather_options[selected_weather],
+                    titlefont=dict(color="orange"),
+                    tickfont=dict(color="orange"),
+                    overlaying='y',
+                    side='right'
+                ),
+                hovermode="x unified",
+                legend=dict(x=0.01, y=0.99),
+                margin=dict(t=60, b=40)
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        elif level == "Month":
+            filtered_df['month'] = filtered_df.index.month
+            monthly = filtered_df.groupby('month')[['use [kW]', selected_weather]].mean(numeric_only=True)
+
+            import plotly.graph_objects as go
+            fig = go.Figure()
+
+            fig.add_trace(go.Bar(
+                x=monthly.index,
+                y=monthly['use [kW]'],
+                name='Energy Usage (kWh)',
+                yaxis='y1'
+            ))
+
+            if selected_weather in monthly.columns:
+                fig.add_trace(go.Scatter(
+                    x=monthly.index,
+                    y=monthly[selected_weather],
+                    name=weather_options[selected_weather],
+                    yaxis='y2',
+                    mode='lines+markers',
+                    line=dict(color='orange')
+                ))
+
+            fig.update_layout(
+                title="Monthly Average Energy Usage and Weather Variable",
+                xaxis=dict(
+                    title="Month",
+                    tickmode='array',
+                    tickvals=list(range(1, 13)),
+                    ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+                ),
+                yaxis=dict(
+                    title="Energy Usage (kWh)",
+                    titlefont=dict(color="#1f77b4"),
+                    tickfont=dict(color="#1f77b4")
+                ),
+                yaxis2=dict(
+                    title=weather_options[selected_weather],
+                    titlefont=dict(color="orange"),
+                    tickfont=dict(color="orange"),
+                    overlaying='y',
+                    side='right'
+                ),
+                barmode='group',
+                hovermode="x unified",
+                legend=dict(x=0.01, y=0.99),
+                margin=dict(t=60, b=40)
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+
+    # ========== TAB 2: Placeholder (unchanged) ==========
     with tab2:
-        st.subheader("Energy Consumption Relationships")
-        
-        with st.expander("Temperature Impact", expanded=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                try:
-                    # Create temperature bins and calculate mean consumption
-                    temp_bins = pd.cut(filtered_df['temperature'], bins=10)
-                    temp_group = filtered_df.groupby(temp_bins)['use [kW]'].mean().reset_index()
-                    
-                    # Convert intervals to readable strings
-                    temp_group['temp_range'] = temp_group['temperature'].apply(
-                        lambda x: f"{x.left:.1f}°C to {x.right:.1f}°C"
-                    )
-                    
-                    fig = px.bar(
-                        temp_group,
-                        x='temp_range',
-                        y='use [kW]',
-                        title='Average Consumption by Temperature Range',
-                        labels={'use [kW]': 'Avg Power (kW)', 'temp_range': 'Temperature Range'}
-                    )
-                    fig.update_layout(xaxis_tickangle=-45)
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                except Exception as e:
-                    st.error(f"Could not create temperature bins chart: {str(e)}")
-                
-            with col2:
-                try:
-                    sample_df = filtered_df.sample(min(1000, len(filtered_df)))
-                    fig = px.scatter(
-                        sample_df,
-                        x='temperature',
-                        y='use [kW]',
-                        color='hour',
-                        trendline="lowess",
-                        title='Temperature vs Consumption',
-                        labels={'temperature': 'Temperature (°C)', 'use [kW]': 'Power (kW)'}
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Temperature scatter error: {str(e)}")
-        
-        # Weather condition impact
-        with st.expander("Weather Condition Impact"):
-            if 'icon' in filtered_df.columns:
-                fig = px.box(
-                    filtered_df,
-                    x='icon',
-                    y='use [kW]',
-                    color='icon',
-                    title='Energy Consumption by Weather Condition',
-                    labels={'use [kW]': 'Power (kW)', 'icon': 'Weather Condition'}
+        st.subheader("🔍 Energy Consumption Relationships")
+
+        weather_cols = [
+            'temperature', 'humidity', 'windSpeed', 
+            'windBearing', 'pressure', 'apparentTemperature',
+            'dewPoint', 'precipProbability'
+        ]
+        available_cols = [col for col in weather_cols if col in filtered_df.columns]
+        device_cols = ['use [kW]'] + [col for col in DEVICES if col in filtered_df.columns]
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Correlation Matrix
+            st.markdown("### Correlation Matrix")
+            import plotly.express as px
+            cor_df = filtered_df[['use [kW]'] + available_cols].corr().round(2)
+            fig_cor = px.imshow(
+                cor_df,
+                text_auto=True,
+                color_continuous_scale='RdBu_r',
+                title='Correlation Matrix: Energy Usage and Weather Metrics',
+                aspect='auto',
+                height=500,
+                labels=dict(color='Correlation')
+            )
+            fig_cor.update_layout(
+                margin=dict(l=40, r=40, t=60, b=40),
+                font=dict(size=12),
+                xaxis=dict(side='bottom', tickangle=45),
+                yaxis=dict(tickmode='linear')
+            )
+            st.plotly_chart(fig_cor, use_container_width=True)
+
+        with col2:
+            # Regression line: Any Energy Variable vs Weather Variable
+            st.markdown("### Regression: Device or Total Usage vs Weather Variable")
+            selected_var = st.selectbox("Select a weather variable", available_cols, index=0)
+            selected_energy = st.selectbox("Select energy usage", device_cols, index=0, key="energy_vs_weather")
+
+            if selected_var in filtered_df.columns and selected_energy in filtered_df.columns:
+                fig_reg = px.scatter(
+                    filtered_df, x=selected_var, y=selected_energy,
+                    trendline='ols',
+                    title=f'{selected_energy} vs {selected_var} (with Regression Line)',
+                    labels={selected_var: selected_var, selected_energy: 'Energy Usage (kW)'}
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig_reg, use_container_width=True)
             else:
-                st.warning("Weather condition data not available")
-    
+                st.info("Selected variables not available for regression analysis.")
+
+        if 'summary' in filtered_df.columns:
+            filtered_df['weather_group'] = filtered_df['summary'].apply(
+                lambda s: (
+                    '☀️ Clear' if s == 'Clear'
+                    else '⛅️ Mostly Cloudy' if s == 'Mostly Cloudy'
+                    else '☁️ Overcast' if s == 'Overcast'
+                    else '🌤️ Partly Cloudy' if s == 'Partly Cloudy'
+                    else '🌦️ Drizzle' if s == 'Drizzle'
+                    else '🌧️ Light Rain' if s == 'Light Rain'
+                    else '🌧️ Rain' if s == 'Rain'
+                    else '❄️ Light Snow' if s == 'Light Snow'
+                    else '❄️ Flurries' if s == 'Flurries'
+                    else '💨 Breezy' if s == 'Breezy'
+                    else '🔍 Other'
+                )
+            )
+
+            st.markdown("### 🌦️ Energy Usage by Weather Group (Based on Summary)")
+            fig_group = px.box(
+                filtered_df,
+                x='weather_group',
+                y='use [kW]',
+                color='weather_group',
+                title='Energy Usage Distribution by Weather Summary Group',
+                labels={'weather_group': 'Weather Group', 'use [kW]': 'Energy Usage (kW)'}
+            )
+            st.plotly_chart(fig_group, use_container_width=True)
+        else:
+            st.info("Column 'summary' not found.")
+
+
+    # ========== TAB 3: Placeholder (unchanged) ==========
     with tab3:
-        st.subheader("Detailed Weather Conditions")
-        
-        # Wind analysis
-        with st.expander("Wind Analysis"):
-            col1, col2 = st.columns(2)
-            with col1:
-                fig = px.line(
-                    hourly_df,
-                    x='date',
-                    y='windSpeed',
-                    title='Wind Speed Over Time',
-                    labels={'windSpeed': 'Wind Speed (km/h)', 'date': 'Date'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                if 'windBearing' in filtered_df.columns:
-                    fig = px.scatter_polar(
-                        filtered_df,
-                        r='windSpeed',
-                        theta='windBearing',
-                        color='temperature',
-                        title='Wind Direction and Speed',
-                        labels={'windSpeed': 'Wind Speed (km/h)'}
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-        
-        # Precipitation analysis
-        with st.expander("Precipitation Analysis"):
-            if 'precipIntensity' in filtered_df.columns:
-                col1, col2 = st.columns(2)
-                with col1:
-                    fig = px.line(
-                        hourly_df,
-                        x='date',
-                        y='precipIntensity',
-                        title='Precipitation Intensity',
-                        labels={'precipIntensity': 'Intensity (mm/h)', 'date': 'Date'}
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    fig = px.scatter(
-                        filtered_df[filtered_df['precipIntensity'] > 0],
-                        x='precipIntensity',
-                        y='use [kW]',
-                        color='temperature',
-                        title='Energy Use During Precipitation',
-                        labels={'precipIntensity': 'Precipitation (mm/h)', 'use [kW]': 'Power (kW)'}
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+        # 1. Weather-Based Device Usage Clustering
+        st.markdown("### 🔀 Weather-Based Device Usage Clustering")
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.decomposition import PCA
+        from sklearn.cluster import KMeans
+
+        cluster_cols = ['use [kW]'] + [col for col in weather_cols if col in filtered_df.columns]
+        cluster_df = filtered_df[cluster_cols].dropna().copy()
+
+        if len(cluster_df) > 1000:
+            cluster_df_sample = cluster_df.sample(1000, random_state=42)
+        else:
+            cluster_df_sample = cluster_df
+
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(cluster_df_sample)
+
+        pca = PCA(n_components=2)
+        X_pca = pca.fit_transform(X_scaled)
+
+        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(X_pca)
+
+        cluster_df_sample['Cluster'] = labels
+        cluster_df_sample['PC1'] = X_pca[:, 0]
+        cluster_df_sample['PC2'] = X_pca[:, 1]
+
+        fig_cluster = px.scatter(
+            cluster_df_sample,
+            x='PC1', y='PC2', color='Cluster',
+            title="K-Means Clustering of Weather & Energy Patterns",
+            labels={'PC1': 'Principal Component 1', 'PC2': 'Principal Component 2'}
+        )
+        st.plotly_chart(fig_cluster, use_container_width=True)
+
+        # 2. Seasonal Comparison (Bar + Violin Combined)
+        st.markdown("### 🌱 Seasonal Weather and Energy Analysis")
+
+        def get_season(month):
+            if month in [12, 1, 2]:
+                return "Winter"
+            elif month in [3, 4, 5]:
+                return "Spring"
+            elif month in [6, 7, 8]:
+                return "Summer"
             else:
-                st.warning("Precipitation data not available")
+                return "Autumn"
+
+        full_df = df.copy()
+        full_df['month'] = full_df.index.month
+        full_df['season'] = full_df['month'].apply(get_season)
+
+        # Bar plot: Energy usage by season
+        seasonal_usage = full_df.groupby('season')['use [kW]'].mean().reindex(['Winter', 'Spring', 'Summer', 'Autumn'])
+        fig_season_usage = px.bar(
+            seasonal_usage,
+            x=seasonal_usage.index,
+            y=seasonal_usage.values,
+            labels={'x': 'Season', 'y': 'Average Energy Usage (kW)'},
+            title='Average Energy Usage by Season'
+        )
+        st.plotly_chart(fig_season_usage, use_container_width=True)
+
+        # Violin plot: Weather variable by season
+        st.markdown("### 🎻 Weather Variable Distribution by Season")
+        violin_var = st.selectbox("Select weather variable", weather_cols, key="violin_weather")
+        if violin_var in full_df.columns:
+            fig_violin = px.violin(
+                full_df,
+                x='season', y=violin_var, color='season',
+                box=True, points='all',
+                title=f'{violin_var} Distribution Across Seasons'
+            )
+            st.plotly_chart(fig_violin, use_container_width=True)
+
 
 # ====================== MAIN APP ======================
 def main():
