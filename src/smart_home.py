@@ -1315,7 +1315,159 @@ def devices_page(df):
             st.error(f"Error processing device data: {str(e)}")
     
     with tab3:
-        print("Tab 3: Correlations")     
+        st.subheader("Device Consumption Correlations")
+        
+        # Get available date range
+        min_date = df.index.min().date()
+        max_date = df.index.max().date()
+
+        # Create date selection UI with calendar
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "From date",
+                min_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="devices_tab3_start",
+                format="DD/MM/YYYY"
+            )
+        with col2:
+            end_date = st.date_input(
+                "To date",
+                max_date,
+                min_value=min_date,
+                max_value=max_date,
+                key="devices_tab3_end",
+                format="DD/MM/YYYY"
+            )
+
+        # Validate date range
+        if start_date > end_date:
+            st.error("End date must be after start date!")
+            st.stop()
+        st.markdown("")
+
+        # Device selection (exclude Solar [kW])
+        selected_devices = st.multiselect(
+            "Select devices to analyze correlations (or leave empty for all devices)",
+            NON_SOLAR_DEVICES,
+            default=[],
+            key="devices_tab3_select"
+        )
+
+        # Use all non-solar devices if none selected
+        devices_to_analyze = selected_devices if selected_devices else NON_SOLAR_DEVICES
+
+        try:
+            # Filter data by selected date range
+            date_mask = (df.index.date >= start_date) & (df.index.date <= end_date)
+            filtered_df = df.loc[date_mask]
+
+            if filtered_df.empty:
+                st.warning(f"No data available for the selected date range")
+                return
+
+            # Calculate daily consumption for each device
+            daily_data = pd.DataFrame()
+            for device in devices_to_analyze:
+                device_daily = calculate_daily_for_device(filtered_df, device)
+                if not device_daily.empty:
+                    daily_data[device.replace(" [kW]", "")] = device_daily[device]
+
+            if daily_data.empty or len(daily_data.columns) < 2:
+                st.warning("Insufficient data or too few devices selected for correlation analysis")
+                return
+
+            # Compute correlation matrix
+            corr_matrix = daily_data.corr(method='pearson').round(2)
+
+            # Create correlation heatmap
+            fig_corr = px.imshow(
+                corr_matrix,
+                text_auto=True,
+                color_continuous_scale='RdBu',
+                zmin=-1,
+                zmax=1,
+                title='Correlation Matrix: Device Daily Consumption',
+                labels=dict(color='Correlation'),
+                aspect='equal'
+            )
+            fig_corr.update_layout(
+                height=600,
+                width=600,
+                margin=dict(t=80, b=80, l=80, r=80),
+                xaxis=dict(
+                    tickangle=45,
+                    title="Device",
+                    side="bottom"
+                ),
+                yaxis=dict(
+                    title="Device"
+                ),
+                coloraxis_colorbar=dict(
+                    title="Correlation",
+                    thickness=15,
+                    len=0.5,
+                    yanchor="middle",
+                    y=0.5
+                )
+            )
+            fig_corr.update_traces(
+                hovertemplate="Device X: %{x}<br>Device Y: %{y}<br>Correlation: %{z:.2f}<extra></extra>"
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+            # Find strongest positive and negative correlations
+            corr_matrix_upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+            max_corr = corr_matrix_upper.max().max()
+            min_corr = corr_matrix_upper.min().min()
+
+            if not pd.isna(max_corr):
+                max_pair = corr_matrix_upper.stack().idxmax()
+                max_pair_str = f"{max_pair[0]} & {max_pair[1]}"
+                max_corr_val = corr_matrix.loc[max_pair[0], max_pair[1]]
+            else:
+                max_pair_str = "N/A"
+                max_corr_val = "N/A"
+
+            if not pd.isna(min_corr):
+                min_pair = corr_matrix_upper.stack().idxmin()
+                min_pair_str = f"{min_pair[0]} & {min_pair[1]}"
+                min_corr_val = corr_matrix.loc[min_pair[0], min_pair[1]]
+            else:
+                min_pair_str = "N/A"
+                min_corr_val = "N/A"
+
+            # Display correlation metrics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(
+                    label="Strongest Positive Correlation",
+                    value=f"{max_corr_val:.2f}" if max_corr_val != "N/A" else "N/A",
+                    delta=max_pair_str
+                )
+            with col2:
+                st.metric(
+                    label="Strongest Negative Correlation",
+                    value=f"{min_corr_val:.2f}" if min_corr_val != "N/A" else "N/A",
+                    delta=min_pair_str
+                )
+
+            # Expander with instructions
+            with st.expander("How to read the correlation heatmap"):
+                st.markdown("""
+                - **Heatmap**: Shows Pearson correlations between daily energy consumption of selected devices.
+                - **Color Scale**: Red indicates negative correlations (one device’s high usage corresponds to another’s low usage), blue indicates positive correlations (devices’ usage patterns align).
+                - **Values**: Range from -1 (strong negative correlation) to 1 (strong positive correlation); 0 means no correlation.
+                - **Diagonal**: Always 1 (each device correlates perfectly with itself).
+                - **Hover**: Displays device pairs and their correlation value.
+                - **Metrics**: Highlight the strongest positive and negative correlations (excluding self-correlations).
+                - Use the date range and device selection to focus the analysis.
+                """)
+
+        except Exception as e:
+            st.error(f"Error processing correlation data: {str(e)}")   
 
          
 def weather_page(df):
