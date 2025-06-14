@@ -299,10 +299,8 @@ def overview_page(data):
     if 'use [kW]' not in data.columns:
         st.error("Column 'use [kW]' not found in data")
         return
-    
 
     # ========== REST OF OVERVIEW PAGE ==========
-
     start_date = data.index.min().date()
     end_date = data.index.max().date()
     
@@ -315,7 +313,7 @@ def overview_page(data):
         filtered = filtered.select_dtypes(include=['number'])
         daily_energy_use = calculate_daily_for_use(filtered)
         daily_energy_gen = calculate_daily_for_gen(filtered)
-        hourly_energy_use = calculate_hourly_for_use(filtered)           
+        hourly_energy_use = calculate_hourly_for_use(filtered)
         hourly_data_gen = calculate_hourly_for_gen(filtered)
         
         # ========== WEEKLY HEATMAP ==========
@@ -472,7 +470,6 @@ def overview_page(data):
             - Only the first week of each month is labeled for clarity.
             """)
 
-
         tab1, tab2 = st.tabs(["DAILY ENERGY CONSUMPTION & GENERATION", "ENERGY SUMMARY BY DAY"])
 
         with tab1:
@@ -553,35 +550,54 @@ def overview_page(data):
                 'gen [kW]': hourly_data_gen['gen [kW]']
             }).fillna(0)
 
-            # Create grouped bar chart
-            fig = px.bar(
-                combined_data,
-                x=combined_data.index,
-                y=['use [kW]', 'gen [kW]'],
-                title=f"HOURLY ENERGY CONSUMPTION & GENERATION - {selected_date.strftime('%d/%m/%Y')}",
-                labels={'value': 'kWh', 'datetime': 'Hour'},
-                color_discrete_sequence=['#3498db', '#e74c3c']  # Match Tab 2 colors
+            # Hourly range slider for both charts
+            slider_hour_range = st.slider(
+                "Select hour range to zoom",
+                min_value=0,
+                max_value=23,
+                value=(0, 23),
+                step=1,
+                format="%d:00",
+                key="tab1_hour_slider"
             )
 
-            # Customize chart to match Tab 2 styling
-            fig.update_layout(
-                xaxis_tickformat='%H:%M',
-                hovermode="x unified",
-                plot_bgcolor='white',
-                height=450,
-                barmode='group',  # Bars side by side
-                xaxis_title="Hour",
-                yaxis_title="kWh"
-            )
+            # Extract slider start and end hours
+            slider_start_hour, slider_end_hour = slider_hour_range
 
-            # Format hover and bar labels
-            fig.update_traces(
-                hovertemplate="<b>%{x|%H:%M}</b><br>%{y:.2f} kWh",
-                texttemplate='%{y:.1f}',
-                textposition='outside'
-            )
+            # Filter combined data for slider hour range
+            slider_mask = (combined_data.index.hour >= slider_start_hour) & (combined_data.index.hour <= slider_end_hour)
+            slider_combined_data = combined_data[slider_mask]
 
-            st.plotly_chart(fig, use_container_width=True)
+            # Create grouped bar chart with slider range
+            if slider_combined_data.empty:
+                st.warning("No data available for selected hour range for bar chart")
+            else:
+                fig = px.bar(
+                    slider_combined_data,
+                    x=slider_combined_data.index,
+                    y=['use [kW]', 'gen [kW]'],
+                    title=f"HOURLY ENERGY CONSUMPTION & GENERATION - {selected_date.strftime('%d/%m/%Y')} ({slider_start_hour:02d}:00 to {slider_end_hour:02d}:00)",
+                    labels={'value': 'kWh', 'datetime': 'Hour'},
+                    color_discrete_sequence=['#3498db', '#e74c3c']
+                )
+
+                fig.update_layout(
+                    xaxis_tickformat='%H:%M',
+                    hovermode="x unified",
+                    plot_bgcolor='white',
+                    height=450,
+                    barmode='group',
+                    xaxis_title="Hour",
+                    yaxis_title="kWh"
+                )
+
+                fig.update_traces(
+                    hovertemplate="<b>%{x|%H:%M}</b><br>%{y:.2f} kWh",
+                    texttemplate='%{y:.1f}',
+                    textposition='outside'
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
 
             # Net energy section
             st.subheader("NET ENERGY (CONSUMPTION - GENERATION)")
@@ -594,39 +610,44 @@ def overview_page(data):
                 }).fillna(0)
                 hourly_net_data['Net [kWh]'] = hourly_net_data['use [kW]'] - hourly_net_data['gen [kW]']
                 
-                # Create line chart for net energy
-                fig = px.line(
-                    hourly_net_data,
-                    x=hourly_net_data.index,
-                    y='Net [kWh]',
-                    title=f'HOURLY NET ENERGY TREND - {selected_date.strftime("%d/%m/%Y")}',
-                    labels={
-                        'Net [kWh]': 'kWh',
-                        'datetime': 'Hour'
-                    },
-                    color_discrete_sequence=['#3498db'],  # Match Tab 2 color
-                    markers=True
-                )
-                
-                # Customize chart to match Tab 2
-                fig.update_layout(
-                    xaxis_title="Hour",
-                    yaxis_title="kWh",
-                    hovermode="x unified",
-                    height=500,
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    xaxis=dict(
-                        showgrid=True,
-                        gridcolor='lightgray',
-                        tickformat='%H:%M'
-                    ),
-                    yaxis=dict(
-                        showgrid=True,
-                        gridcolor='lightgray'
+                # Filter net energy data for slider hour range
+                slider_net_data = hourly_net_data[slider_mask]
+
+                if slider_net_data.empty:
+                    st.warning("No data available for selected hour range for line chart")
+                else:
+                    # Create line chart for net energy with slider range
+                    fig = px.line(
+                        slider_net_data,
+                        x=slider_net_data.index,
+                        y='Net [kWh]',
+                        title=f'HOURLY NET ENERGY TREND - {selected_date.strftime("%d/%m/%Y")} ({slider_start_hour:02d}:00 to {slider_end_hour:02d}:00)',
+                        labels={
+                            'Net [kWh]': 'kWh',
+                            'datetime': 'Hour'
+                        },
+                        color_discrete_sequence=['#3498db'],
+                        markers=True
                     )
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
+                    
+                    fig.update_layout(
+                        xaxis_title="Hour",
+                        yaxis_title="kWh",
+                        hovermode="x unified",
+                        height=500,
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        xaxis=dict(
+                            showgrid=True,
+                            gridcolor='lightgray',
+                            tickformat='%H:%M'
+                        ),
+                        yaxis=dict(
+                            showgrid=True,
+                            gridcolor='lightgray'
+                        )
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
                 
             except Exception as e:
                 st.error(f"Data processing error: {str(e)}")
@@ -757,7 +778,7 @@ def overview_page(data):
 
             try:
                 # Calculate daily net energy
-                daily_data = filtered_data[['use [kW]', 'gen [kW]']].resample('D').sum() / 60  # Convert to kWh
+                daily_data = filtered_data[['use [kW]', 'gen [kW]']].resample('D').sum() / 60  # Convert kW to kWh
                 daily_data['Net [kWh]'] = daily_data['use [kW]'] - daily_data['gen [kW]']
                 
                 # Create line chart for net energy
