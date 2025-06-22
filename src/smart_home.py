@@ -2867,7 +2867,7 @@ def render_sidebar(processed_df):
 
         return page
 
-# ====================== MAIN ENTRY ============================
+# ====================== MAIN ENTRY =============================
 def main():
     with st.spinner("🔄 Loading data..."):
         df = load_data()
