@@ -1,11 +1,3 @@
-# Conda Environment Setup Instructions
-#
-#    conda env create -f environment.yml
-#    conda env update --file environment.yml --prune
-#    conda env export --name data_visualisation > environment.yml
-#    conda env remove --name data_visualisation
-#    conda env list
-
 name: data_visualisation
 channels:
   - anaconda
@@ -20,6 +12,10 @@ dependencies:
   - matplotlib
   - seaborn
   - plotly
+  - prophet
+  - xgboost
+  - shap
+  - statsmodels
   - pip:
       - ipykernel==6.17.1
       - ipython==8.7.0
