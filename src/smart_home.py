@@ -7,6 +7,15 @@ import os
 from datetime import datetime, timedelta
 from prophet import Prophet
 from statsmodels.tsa.arima.model import ARIMA
+import seaborn as sns
+import matplotlib.pyplot as plt
+import xgboost as xgb
+import shap
+import xgboost as xgb
+import statsmodels.api as sm
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import IsolationForest
+import traceback
 
 # ====================== APP CONFIGURATION ======================
 st.set_page_config(
@@ -15,6 +24,22 @@ st.set_page_config(
     page_icon="🏠",
     initial_sidebar_state="expanded"
 )
+# ====================== CUSTOM CSS =============================
+st.markdown("""
+    <style>
+    .block-container {
+        padding: 2rem 3rem;
+    }
+    .stApp {
+        background-color: #f8f9fa;
+    }
+    @media screen and (max-width: 768px) {
+        .block-container {
+            padding: 1rem;
+        }
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # ====================== CONSTANTS ======================
 DEVICES = [
@@ -25,8 +50,8 @@ DEVICES = [
     'Microwave [kW]', 'Living room [kW]', 'Solar [kW]'
 ]
 NON_SOLAR_DEVICES = [device for device in DEVICES if device != 'Solar [kW]']
-WEATHER = [
-    'temperature', 'humidity', 'windSpeed', 
+WEATHER_COLS = [
+    'temperature', 'humidity', 'windSpeed',
     'windBearing', 'pressure', 'apparentTemperature',
     'dewPoint', 'precipProbability'
 ]
@@ -214,26 +239,6 @@ def calculate_monthly_for_device(df, device_col):
                 ])
                 monthly_data.index = monthly_index
                 return monthly_data
-def show_weather_metrics(df, cols):
-    metrics = [
-        ('temperature', '🌡️ Avg Temp', '°C'),
-        ('apparentTemperature', '🌡️ Feels Like', '°C'),
-        ('humidity', '💧 Humidity', '%'),
-        ('windSpeed', '🌬️ Wind Speed', 'km/h'),
-        ('pressure', '⏲️ Pressure', 'hPa')
-    ]
-    valid = [(c, n, u) for c, n, u in metrics if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
-    
-    for i, (col, name, unit) in enumerate(valid[:len(cols)]):
-        try:
-            avg = df[col].mean()
-            min_val = df[col].min()
-            max_val = df[col].max()
-            delta = f"{min_val:.1f}{unit} → {max_val:.1f}{unit}"  
-            with cols[i]:
-                st.metric(name, f"{avg:.1f}{unit}", delta)
-        except Exception as e:
-            st.error(f"Error: {name} – {str(e)}")
 
 def plot_temp_bins(df, power_col):
     bins = pd.cut(df['temperature'], bins=10)
@@ -248,6 +253,15 @@ def scatter_temp_vs_power(df, power_col):
     fig = px.scatter(sample, x='temperature', y=power_col, color='hour',
                      trendline='ols', title='Temperature vs Consumption')
     st.plotly_chart(fig, use_container_width=True)
+
+def metric_box(title, value, subtitle=None, color="#1f77b4"):
+    st.markdown(f"""
+        <div style="padding:10px;border-radius:12px;background:{color};color:white;text-align:center;margin-bottom:10px">
+            <div style="font-size:14px;">{title}</div>
+            <div style="font-size:24px;font-weight:bold;">{value}</div>
+            <div style="font-size:12px;">{subtitle if subtitle else ""}</div>
+        </div>
+    """, unsafe_allow_html=True)
 
 @st.cache_data
 def process_data(_df):
@@ -2295,11 +2309,10 @@ def forecasting_page(df):
         except Exception as e:
             st.error(f"Error in device forecasting: {str(e)}")
             st.exception(e)
-
+# ====================== WEATHER PAGE ======================
 def weather_page(df):
     """
-    Weather Impact Analysis:
-    Displays how weather metrics relate to energy usage patterns.
+    Weather Impact Analysis: Displays how weather metrics relate to energy usage patterns.
     """
     st.header("🌤️ Weather Impact Analysis")
 
@@ -2307,348 +2320,539 @@ def weather_page(df):
         st.warning("No data available")
         return
 
+    df = df.copy()
+
+    if 'temperature' in df.columns and df['temperature'].max() > 80:
+        df['temperature'] = (df['temperature'] - 32) * 5.0 / 9.0
+        if 'apparentTemperature' in df.columns:
+            df['apparentTemperature'] = (df['apparentTemperature'] - 32) * 5.0 / 9.0
+        if 'dewPoint' in df.columns:
+            df['dewPoint'] = (df['dewPoint'] - 32) * 5.0 / 9.0
+
+    numeric_cols = ['temperature', 'apparentTemperature', 'humidity', 'pressure', 'windSpeed']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    df['date'] = df.index.date
+    df['hour'] = df.index.hour
+    df['weekday'] = df.index.day_name()
+    df['month'] = df.index.month
+
+    def get_season(month):
+        if month in [12, 1, 2]:
+            return "Winter"
+        elif month in [3, 4, 5]:
+            return "Spring"
+        elif month in [6, 7, 8]:
+            return "Summer"
+        else:
+            return "Autumn"
+
+    df['season'] = df['month'].apply(get_season)
+
     st.markdown("---")
-    tab1, tab2, tab3 = st.tabs(["📈 Weather Trends", "🔍 Energy Relationships", "📊 Advanced Insights"])
+    tab1, tab2, tab3 = st.tabs(["🌦️ Explore Weather Trends", "📉 Energy vs. Weather", "🔬 Insightful Discoveries"])
 
-    # ========== TAB 1: WEATHER TRENDS ==========
     with tab1:
-        st.subheader("📈 Weather & Energy Trends")
+        render_weather_trends_tab(df)
 
-        # Ensure datetime info is available
-        df['date'] = df.index.date
-        df['hour'] = df.index.hour
-        df['weekday'] = df.index.day_name()
-
-        mode = st.radio("Select Time Range", ["Full Year", "Custom Range"], horizontal=True)
-
-        if mode == "Custom Range":
-            date_range = date_filter(df, "weather_range")
-            if not date_range or len(date_range) < 2:
-                st.error("Please select a valid time range.")
-                return
-            filtered_df = df[(df.index.date >= date_range[0]) & (df.index.date <= date_range[1])].copy()
-        else:
-            filtered_df = df.copy()
-
-        # General Weather Summary (keep this section)
-        st.subheader("Weather Summary")
-        show_weather_metrics(filtered_df, st.columns(5))
-
-        # Aggregation level
-        level = st.radio("📊 Compare by", ["Day", "Month"], horizontal=True)
-
-        # Popular weather variables
-        weather_options = {
-            'temperature': 'Temperature (°C)',
-            'apparentTemperature': 'Apparent Temperature (°C)',
-            'humidity': 'Humidity (%)',
-            'pressure': 'Pressure (hPa)',
-            'windSpeed': 'Wind Speed (km/h)',
-            'dewPoint': 'Dew Point (°C)'
-        }
-
-        # Select weather variable
-        available_weather_cols = [col for col in weather_options if col in filtered_df.columns]
-        selected_weather = st.selectbox(
-            "🌦️ Select weather variable to compare",
-            available_weather_cols,
-            format_func=lambda x: weather_options[x]
-        )
-
-        if level == "Day":
-            daily = filtered_df.resample('D').mean(numeric_only=True)
-
-            import plotly.graph_objects as go
-            fig = go.Figure()
-
-            fig.add_trace(go.Scatter(
-                x=daily.index,
-                y=daily['use [kW]'],
-                name='Energy Usage (kWh)',
-                mode='lines+markers',
-                yaxis='y1'
-            ))
-
-            if selected_weather in daily.columns:
-                fig.add_trace(go.Scatter(
-                    x=daily.index,
-                    y=daily[selected_weather],
-                    name=weather_options[selected_weather],
-                    mode='lines+markers',
-                    yaxis='y2',
-                    line=dict(color='orange')
-                ))
-
-            fig.update_layout(
-                title="Daily Energy Usage and Weather Variable",
-                xaxis_title="Date",
-                yaxis=dict(
-                    title="Energy Usage (kWh)",
-                    titlefont=dict(color="#1f77b4"),
-                    tickfont=dict(color="#1f77b4")
-                ),
-                yaxis2=dict(
-                    title=weather_options[selected_weather],
-                    titlefont=dict(color="orange"),
-                    tickfont=dict(color="orange"),
-                    overlaying='y',
-                    side='right'
-                ),
-                hovermode="x unified",
-                legend=dict(x=0.01, y=0.99),
-                margin=dict(t=60, b=40)
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-        elif level == "Month":
-            filtered_df['month'] = filtered_df.index.month
-            monthly = filtered_df.groupby('month')[['use [kW]', selected_weather]].mean(numeric_only=True)
-
-            import plotly.graph_objects as go
-            fig = go.Figure()
-
-            fig.add_trace(go.Bar(
-                x=monthly.index,
-                y=monthly['use [kW]'],
-                name='Energy Usage (kWh)',
-                yaxis='y1'
-            ))
-
-            if selected_weather in monthly.columns:
-                fig.add_trace(go.Scatter(
-                    x=monthly.index,
-                    y=monthly[selected_weather],
-                    name=weather_options[selected_weather],
-                    yaxis='y2',
-                    mode='lines+markers',
-                    line=dict(color='orange')
-                ))
-
-            fig.update_layout(
-                title="Monthly Average Energy Usage and Weather Variable",
-                xaxis=dict(
-                    title="Month",
-                    tickmode='array',
-                    tickvals=list(range(1, 13)),
-                    ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-                ),
-                yaxis=dict(
-                    title="Energy Usage (kWh)",
-                    titlefont=dict(color="#1f77b4"),
-                    tickfont=dict(color="#1f77b4")
-                ),
-                yaxis2=dict(
-                    title=weather_options[selected_weather],
-                    titlefont=dict(color="orange"),
-                    tickfont=dict(color="orange"),
-                    overlaying='y',
-                    side='right'
-                ),
-                barmode='group',
-                hovermode="x unified",
-                legend=dict(x=0.01, y=0.99),
-                margin=dict(t=60, b=40)
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-
-    # ========== TAB 2: Placeholder (unchanged) ==========
     with tab2:
-        st.subheader("🔍 Energy Consumption Relationships")
+        render_energy_relationships_tab(df)
 
-        weather_cols = [
-            'temperature', 'humidity', 'windSpeed', 
-            'windBearing', 'pressure', 'apparentTemperature',
-            'dewPoint', 'precipProbability'
-        ]
-        available_cols = [col for col in weather_cols if col in filtered_df.columns]
-        device_cols = ['use [kW]'] + [col for col in DEVICES if col in filtered_df.columns]
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            # Correlation Matrix
-            st.markdown("### Correlation Matrix")
-            import plotly.express as px
-            cor_df = filtered_df[['use [kW]'] + available_cols].corr().round(2)
-            fig_cor = px.imshow(
-                cor_df,
-                text_auto=True,
-                color_continuous_scale='RdBu_r',
-                title='Correlation Matrix: Energy Usage and Weather Metrics',
-                aspect='auto',
-                height=500,
-                labels=dict(color='Correlation')
-            )
-            fig_cor.update_layout(
-                margin=dict(l=40, r=40, t=60, b=40),
-                font=dict(size=12),
-                xaxis=dict(side='bottom', tickangle=45),
-                yaxis=dict(tickmode='linear')
-            )
-            st.plotly_chart(fig_cor, use_container_width=True)
-
-        with col2:
-            # Regression line: Any Energy Variable vs Weather Variable
-            st.markdown("### Regression: Device or Total Usage vs Weather Variable")
-            selected_var = st.selectbox("Select a weather variable", available_cols, index=0)
-            selected_energy = st.selectbox("Select energy usage", device_cols, index=0, key="energy_vs_weather")
-
-            if selected_var in filtered_df.columns and selected_energy in filtered_df.columns:
-                fig_reg = px.scatter(
-                    filtered_df, x=selected_var, y=selected_energy,
-                    trendline='ols',
-                    title=f'{selected_energy} vs {selected_var} (with Regression Line)',
-                    labels={selected_var: selected_var, selected_energy: 'Energy Usage (kW)'}
-                )
-                st.plotly_chart(fig_reg, use_container_width=True)
-            else:
-                st.info("Selected variables not available for regression analysis.")
-
-        if 'summary' in filtered_df.columns:
-            filtered_df['weather_group'] = filtered_df['summary'].apply(
-                lambda s: (
-                    '☀️ Clear' if s == 'Clear'
-                    else '⛅️ Mostly Cloudy' if s == 'Mostly Cloudy'
-                    else '☁️ Overcast' if s == 'Overcast'
-                    else '🌤️ Partly Cloudy' if s == 'Partly Cloudy'
-                    else '🌦️ Drizzle' if s == 'Drizzle'
-                    else '🌧️ Light Rain' if s == 'Light Rain'
-                    else '🌧️ Rain' if s == 'Rain'
-                    else '❄️ Light Snow' if s == 'Light Snow'
-                    else '❄️ Flurries' if s == 'Flurries'
-                    else '💨 Breezy' if s == 'Breezy'
-                    else '🔍 Other'
-                )
-            )
-
-            st.markdown("### 🌦️ Energy Usage by Weather Group (Based on Summary)")
-            fig_group = px.box(
-                filtered_df,
-                x='weather_group',
-                y='use [kW]',
-                color='weather_group',
-                title='Energy Usage Distribution by Weather Summary Group',
-                labels={'weather_group': 'Weather Group', 'use [kW]': 'Energy Usage (kW)'}
-            )
-            st.plotly_chart(fig_group, use_container_width=True)
-        else:
-            st.info("Column 'summary' not found.")
-
-
-    # ========== TAB 3: Placeholder (unchanged) ==========
     with tab3:
-        # 1. Weather-Based Device Usage Clustering
-        st.markdown("### 🔀 Weather-Based Device Usage Clustering")
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.decomposition import PCA
-        from sklearn.cluster import KMeans
+        render_advanced_insights_tab(df)
 
-        cluster_cols = ['use [kW]'] + [col for col in weather_cols if col in filtered_df.columns]
-        cluster_df = filtered_df[cluster_cols].dropna().copy()
+# Embedded function: Display summary weather metrics as KPIs
+def show_weather_metrics(df_input, cols):
+        metrics = [
+            ('temperature', '🌡️ Avg Temp', '°C'),
+            ('apparentTemperature', '🌡️ Feels Like', '°C'),
+            ('humidity', '💧 Humidity', '%'),
+            ('windSpeed', '🌬️ Wind Speed', 'km/h'),
+            ('pressure', '⏲️ Pressure', 'hPa')
+        ]
+        valid = [(c, n, u) for c, n, u in metrics if c in df_input.columns and pd.api.types.is_numeric_dtype(df_input[c])]
+        if not valid:
+            st.info("No valid weather metrics found.")
+            return
+        for i, (col, name, unit) in enumerate(valid):
+            if i >= len(cols):
+                break
+            try:
+                avg = df_input[col].mean()
+                min_val = df_input[col].min()
+                max_val = df_input[col].max()
+                delta = f"{min_val:.1f}{unit} → {max_val:.1f}{unit}"
+                with cols[i]:
+                    st.metric(name, f"{avg:.1f}{unit}", delta)
+            except Exception as e:
+                st.error(f"Error: {name} – {str(e)}")
 
-        if len(cluster_df) > 1000:
-            cluster_df_sample = cluster_df.sample(1000, random_state=42)
-        else:
-            cluster_df_sample = cluster_df
+def render_weather_trends_tab(df):
+    st.subheader("📈 Weather & Energy Trends")
 
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(cluster_df_sample)
+    mode = st.radio("Select Time Range", ["Full Year", "Custom Range"], horizontal=True)
 
-        pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(X_scaled)
+    if mode == "Custom Range":
+        date_range = date_filter(df, "weather_range")
+        if not date_range or len(date_range) < 2:
+            st.error("Please select a valid time range.")
+            return
+        filtered_df = df[(df.index.date >= date_range[0]) & (df.index.date <= date_range[1])].copy()
+    else:
+        filtered_df = df.copy()
 
-        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(X_pca)
+    if filtered_df.empty:
+        st.warning("No data available for the selected range.")
+        return
 
-        cluster_df_sample['Cluster'] = labels
-        cluster_df_sample['PC1'] = X_pca[:, 0]
-        cluster_df_sample['PC2'] = X_pca[:, 1]
+    # Weather Summary Metrics
+    st.subheader("Weather Summary")
+    show_weather_metrics(filtered_df, st.columns(5))
 
-        fig_cluster = px.scatter(
-            cluster_df_sample,
-            x='PC1', y='PC2', color='Cluster',
-            title="K-Means Clustering of Weather & Energy Patterns",
-            labels={'PC1': 'Principal Component 1', 'PC2': 'Principal Component 2'}
+    level = st.radio("📊 Compare by", ["Day", "Month"], horizontal=True)
+
+    weather_options = {
+        'temperature': 'Temperature (°C)',
+        'apparentTemperature': 'Apparent Temperature (°C)',
+        'humidity': 'Humidity (%)',
+        'pressure': 'Pressure (hPa)',
+        'windSpeed': 'Wind Speed (km/h)',
+        'dewPoint': 'Dew Point (°C)'
+    }
+    available_weather_cols = [col for col in weather_options if col in filtered_df.columns]
+    selected_weather = st.selectbox("🌦️ Select weather variable to compare", available_weather_cols,
+                                    format_func=lambda x: weather_options[x])
+
+    if level == "Day":
+        daily = filtered_df.resample('D').mean(numeric_only=True)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=daily.index, y=daily['use [kW]'], name='Energy Usage (kWh)',
+                                 mode='lines+markers', yaxis='y1'))
+        if selected_weather in daily.columns:
+            fig.add_trace(go.Scatter(x=daily.index, y=daily[selected_weather],
+                                     name=weather_options[selected_weather],
+                                     mode='lines+markers', yaxis='y2', line=dict(color='orange')))
+        fig.update_layout(
+            title="Daily Energy Usage and Weather Variable",
+            xaxis_title="Date",
+            yaxis=dict(title="Energy Usage (kWh)", titlefont=dict(color="#1f77b4")),
+            yaxis2=dict(title=weather_options[selected_weather], titlefont=dict(color="orange"),
+                        overlaying='y', side='right'),
+            hovermode="x unified"
         )
-        st.plotly_chart(fig_cluster, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-        # 2. Seasonal Comparison (Bar + Violin Combined)
-        st.markdown("### 🌱 Seasonal Weather and Energy Analysis")
-
-        def get_season(month):
-            if month in [12, 1, 2]:
-                return "Winter"
-            elif month in [3, 4, 5]:
-                return "Spring"
-            elif month in [6, 7, 8]:
-                return "Summer"
-            else:
-                return "Autumn"
-
-        full_df = df.copy()
-        full_df['month'] = full_df.index.month
-        full_df['season'] = full_df['month'].apply(get_season)
-
-        # Bar plot: Energy usage by season
-        seasonal_usage = full_df.groupby('season')['use [kW]'].mean().reindex(['Winter', 'Spring', 'Summer', 'Autumn'])
-        fig_season_usage = px.bar(
-            seasonal_usage,
-            x=seasonal_usage.index,
-            y=seasonal_usage.values,
-            labels={'x': 'Season', 'y': 'Average Energy Usage (kW)'},
-            title='Average Energy Usage by Season'
+    elif level == "Month":
+        monthly = filtered_df.groupby('month')[['use [kW]', selected_weather]].mean(numeric_only=True)
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=monthly.index, y=monthly['use [kW]'], name='Energy Usage (kWh)', yaxis='y1'))
+        fig.add_trace(go.Scatter(x=monthly.index, y=monthly[selected_weather],
+                                 name=weather_options[selected_weather], yaxis='y2',
+                                 mode='lines+markers', line=dict(color='orange')))
+        fig.update_layout(
+            title="Monthly Average Energy Usage and Weather Variable",
+            xaxis=dict(title="Month", tickmode='array', tickvals=list(range(1, 13)),
+                       ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']),
+            yaxis=dict(title="Energy Usage (kWh)", titlefont=dict(color="#1f77b4")),
+            yaxis2=dict(title=weather_options[selected_weather], titlefont=dict(color="orange"),
+                        overlaying='y', side='right'),
+            hovermode="x unified"
         )
-        st.plotly_chart(fig_season_usage, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-        # Violin plot: Weather variable by season
-        st.markdown("### 🎻 Weather Variable Distribution by Season")
-        violin_var = st.selectbox("Select weather variable", weather_cols, key="violin_weather")
-        if violin_var in full_df.columns:
-            fig_violin = px.violin(
-                full_df,
-                x='season', y=violin_var, color='season',
-                box=True, points='all',
-                title=f'{violin_var} Distribution Across Seasons'
+
+def render_energy_relationships_tab(df):
+    with st.expander("📘 Explanation: What does this tab show?"):
+        st.markdown("""
+        This section explores **how energy consumption relates to different weather variables**.
+
+        - 🔢 **Correlation Matrix**: Shows how strongly energy usage is correlated with weather metrics.  
+          → Useful to **quickly detect patterns** (e.g., is high temperature linked to more energy use?).  
+          → 🔴 = strong negative, ⚪ = none, 🔵 = strong positive correlation.
+
+        - 📈 **Regression Analysis**: Lets you analyze the **relationship between any weather variable** and **total or device-level energy usage**.  
+          → You can choose a **trendline** (OLS or LOWESS) to visualize the correlation strength and shape.  
+          → The regression summary helps interpret the **slope (coef)** and **R² score**, indicating predictive power.
+
+        - ☁️ **Energy by Weather Group**: Groups energy usage by **weather condition labels** (e.g., Clear, Rainy).  
+          → Provides both **boxplots** for distribution and **bar charts** showing the **likelihood of high usage** under each weather type.  
+          → Helpful to identify which conditions often lead to **peak consumption**.
+
+        Together, these tools help you **understand and quantify** how environmental factors influence household energy demand.
+        """)
+
+
+    st.subheader("🔍 Energy Consumption Relationships")
+    available_cols = [col for col in WEATHER_COLS if col in df.columns]
+    device_cols = ['use [kW]'] + [col for col in DEVICES if col in df.columns]
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### Correlation Matrix")
+
+        with st.expander("ℹ️ How to read the correlation heatmap"):
+            st.markdown("""
+            - **Heatmap**: Pearson correlation between energy and weather.
+            - 🔴 = strong negative | ⚪ = none | 🔵 = strong positive
+            - Diagonal = always 1.
+            """)
+
+        cor_df = df[['use [kW]'] + available_cols].corr(numeric_only=True).round(2)
+        mask = ~np.eye(len(cor_df), dtype=bool)
+        cor_values = cor_df.where(mask)
+
+        max_corr_val = cor_values.max().max()
+        min_corr_val = cor_values.min().min()
+        max_pair = cor_values.stack().idxmax()
+        min_pair = cor_values.stack().idxmin()
+
+        st.markdown(f"""
+        **Strongest Positive**: `{max_pair[0]} ↔ {max_pair[1]}` = **{max_corr_val:.2f}**  
+        **Strongest Negative**: `{min_pair[0]} ↔ {min_pair[1]}` = **{min_corr_val:.2f}**
+        """)
+
+        fig_cor = px.imshow(
+            cor_df, text_auto=True, color_continuous_scale='RdBu_r',
+            labels=dict(color='Correlation')
+        )
+        fig_cor.update_layout(
+            title={'text': 'Correlation Matrix', 'x': 0.5},
+            margin=dict(l=40, r=40, t=60, b=40),
+            font=dict(size=12),
+            coloraxis_colorbar=dict(tickvals=[-1, -0.5, 0, 0.5, 1])
+        )
+        st.plotly_chart(fig_cor, use_container_width=True)
+
+    with col2:
+        st.markdown("### Regression: Device or Total Usage vs Weather Variable")
+
+        selected_var = st.selectbox("Select a weather variable", available_cols)
+        selected_energy = st.selectbox("Select energy usage", device_cols, key="energy_vs_weather")
+        trend_option = st.radio("Trendline type", ["OLS", "LOWESS", "None"], horizontal=True)
+
+        plot_df = df[[selected_var, selected_energy]].dropna()
+        if len(plot_df) > 2000:
+            plot_df = plot_df.sample(2000, random_state=42)
+
+        r2 = coef = intercept = None
+
+        if trend_option == "OLS":
+            try:
+                X = sm.add_constant(plot_df[selected_var])
+                y = plot_df[selected_energy]
+                model = sm.OLS(y, X).fit()
+                coef = model.params[selected_var]
+                intercept = model.params['const']
+                r2 = model.rsquared
+                st.markdown(f"**Regression Summary:** R² = {r2:.2f} | Coef = {coef:.2f} | Intercept = {intercept:.2f}")
+            except Exception as e:
+                st.error(f"Regression failed: {e}")
+
+        trendline_map = {"OLS": "ols", "LOWESS": "lowess", "None": None}
+        fig_reg = px.scatter(
+            plot_df, x=selected_var, y=selected_energy,
+            trendline=trendline_map[trend_option],
+            title=f'{selected_energy} vs {selected_var} (Regression)'
+        )
+
+        if trend_option == "OLS" and r2 is not None:
+            fig_reg.update_layout(annotations=[{
+                'xref': 'paper', 'yref': 'paper', 'x': 0.5, 'y': 1.1,
+                'text': f"R² = {r2:.2f} | Coef = {coef:.2f} | Intercept = {intercept:.2f}",
+                'showarrow': False
+            }])
+
+        st.plotly_chart(fig_reg, use_container_width=True)
+
+    group_order = [
+        '☀️ Clear', '🌤️ Partly Cloudy', '⛅️ Mostly Cloudy', '☁️ Overcast',
+        '🌦️ Drizzle', '🌧️ Light Rain', '🌧️ Rain',
+        '❄️ Light Snow', '❄️ Flurries',
+        '💨 Breezy', '🔍 Other'
+    ]
+
+    # Group weather summary if not already grouped
+    if 'summary' in df.columns and 'weather_group' not in df.columns:
+        df['weather_group'] = df['summary'].map({
+            'Clear': '☀️ Clear', 'Partly Cloudy': '🌤️ Partly Cloudy',
+            'Mostly Cloudy': '⛅️ Mostly Cloudy', 'Overcast': '☁️ Overcast',
+            'Drizzle': '🌦️ Drizzle', 'Light Rain': '🌧️ Light Rain',
+            'Rain': '🌧️ Rain', 'Light Snow': '❄️ Light Snow',
+            'Flurries': '❄️ Flurries', 'Breezy': '💨 Breezy'
+        }).fillna('🔍 Other')
+
+    df['weather_group'] = pd.Categorical(df['weather_group'], categories=group_order, ordered=True)
+
+    with st.expander("🌦 Energy Usage by Weather Group"):
+        st.markdown("""
+        This visualization shows how **energy usage varies across different weather conditions**.  
+        Each boxplot represents the distribution of energy consumption for a specific weather group.  
+
+        The **percentage above each box** indicates the **probability that energy usage exceeds the threshold**  
+        (calculated as: `mean + 1 standard deviation`), helping identify which weather types are most likely associated with high usage.
+
+        **How to read:**
+        - The wider and taller the box, the more variation in usage under that condition.
+        - A high percentage label above a group suggests greater risk of high energy load.
+        """)
+
+        # Calculate threshold for "high usage": mean + 1 standard deviation
+        threshold = df['use [kW]'].mean() + df['use [kW]'].std()
+
+        # Calculate the probability (%) of high usage within each weather group
+        prob_df = df.groupby('weather_group').apply(
+            lambda g: (g['use [kW]'] > threshold).mean() * 100
+        ).reset_index(name='High Usage Probability (%)')
+
+        prob_df['weather_group'] = pd.Categorical(prob_df['weather_group'], categories=group_order, ordered=True)
+        prob_df = prob_df.sort_values('weather_group')
+
+        # Create the main boxplot
+        fig_group = px.box(
+            df, x='weather_group', y='use [kW]', color='weather_group',
+            title='Energy Usage by Weather Group'
+        )
+
+        # Add percentage annotations above each box
+        for i, row in prob_df.iterrows():
+            fig_group.add_annotation(
+                x=row['weather_group'],
+                y=df['use [kW]'].max() * 1.05,
+                text=f"{row['High Usage Probability (%)']:.0f}%",
+                showarrow=False,
+                font=dict(size=12, color='black')
             )
-            st.plotly_chart(fig_violin, use_container_width=True)
 
+        fig_group.update_layout(
+            yaxis_title="Energy Usage [kW]",
+            xaxis_title="Weather Group",
+            margin=dict(t=60),
+            title_font_size=18,
+            xaxis_tickangle=25
+        )
+
+        st.plotly_chart(fig_group, use_container_width=True)
+
+def safe_sample(df, n=3000):
+    return df.sample(n=n, random_state=42) if len(df) > n else df
+
+def render_advanced_insights_tab(df):
+    st.markdown("### 📊 Advanced Weather-Energy Analysis")
+
+    available_weather = [col for col in WEATHER_COLS if col in df.columns]
+
+    # ==== 1. Joint Distribution Plot ====
+    with st.expander("🔄 Weather vs Usage Joint Distribution"):
+        st.markdown("""
+        This plot shows a **joint density distribution** between a selected weather variable and energy usage.
+
+        - Darker areas = more data points.
+        - Helps identify **correlated regions** or **seasonal weather-energy interactions**.
+        - Combines scatter and contour (KDE) visualization.
+        """)
+        if not available_weather:
+            st.warning("No weather columns available.")
+        else:
+            joint_var = st.selectbox("Select weather variable", available_weather, key="joint_var")
+            joint_df = df[[joint_var, 'use [kW]']].dropna()
+            joint_df = safe_sample(joint_df)
+
+            fig_joint, ax = plt.subplots(figsize=(5, 3.5))
+            sns.kdeplot(data=joint_df, x=joint_var, y='use [kW]', fill=True, cmap="mako", thresh=0.05, levels=100)
+            sns.scatterplot(data=joint_df, x=joint_var, y='use [kW]', alpha=0.2, s=10, color="black")
+            ax.set_title(f"Joint Distribution: {joint_var} vs Energy Usage")
+            ax.set_xlabel(joint_var)
+            ax.set_ylabel("Energy Usage (kW)")
+            st.pyplot(fig_joint)
+
+    st.markdown("---")
+
+    # ==== 2. SHAP Feature Importance ====
+    with st.expander("🔍 SHAP Feature Importance for Energy Prediction"):
+        st.markdown("""
+        This section uses **XGBoost** to model energy usage and **SHAP** to explain how each weather variable contributes to the prediction.
+
+        **SHAP advantages**:
+        - Interprets black-box models by attributing **contributions to each input**.
+        - Identifies which **weather features most influence predictions**, and **how**.
+        
+        **Visuals**:
+        - 🐝 **Beeswarm plot**: Direction & magnitude of each variable's impact
+        - 🔍 **Dependence plot**: Select a feature to explore its direct effect
+        """)
+
+        shap_cols = ['use [kW]'] + available_weather
+        shap_df = df[shap_cols].dropna()
+        shap_df = safe_sample(shap_df)
+
+        if shap_df.empty:
+            st.warning("Not enough data for SHAP analysis.")
+        else:
+            try:
+                
+                X = shap_df.drop(columns=['use [kW]'])
+                y = shap_df['use [kW]']
+
+                model = xgb.XGBRegressor(n_estimators=50, max_depth=4, learning_rate=0.1, random_state=42)
+                model.fit(X, y)
+
+                explainer = shap.Explainer(model)
+                shap_values = explainer(X)
+
+                st.markdown("#### 🐝 SHAP Beeswarm Plot")
+                fig_swarm, ax = plt.subplots(figsize=(6, 4)) 
+                shap.plots.beeswarm(shap_values, max_display=10, show=False)
+                st.pyplot(fig_swarm)
+
+            except Exception as e:
+
+                st.warning(f"SHAP analysis failed: {str(e)}")
+                st.error(traceback.format_exc())
+
+
+    st.markdown("---")
+
+    # ==== 3. Violin Plot Across Seasons ====
+    with st.expander("🎻 Weather Variable Distribution Across Seasons"):
+        st.markdown("""
+        This violin plot displays **how weather metrics are distributed across seasons**.
+
+        - Each shape = **value distribution density** for each season.
+        - Use this to analyze **weather variation across the year**.
+        - Boxplots and individual points overlaid for detail.
+        """)
+        if 'season' not in df.columns:
+            st.warning("Column 'season' is missing. Cannot display violin plot.")
+        elif not available_weather:
+            st.warning("No weather columns available for violin plot.")
+        else:
+            violin_var = st.selectbox("Select weather variable", available_weather, key="violin_weather")
+            sample_size = st.radio("Sample size", [500, 1000, 2000], index=1)
+
+            violin_df = df[[violin_var, 'season']].dropna()
+            violin_df = safe_sample(violin_df, sample_size)
+
+            if not violin_df.empty:
+                fig_violin = px.violin(
+                    violin_df, x='season', y=violin_var, color='season',
+                    box=True, points='all',
+                    title=f'{violin_var} Distribution Across Seasons'
+                )
+                st.plotly_chart(fig_violin, use_container_width=True)
+            else:
+                st.info("Not enough data to display violin plot.")
+
+    st.markdown("---")
+
+    # ==== 4. Anomaly Detection by Month ====
+    with st.expander("🚨 Monthly Anomaly Detection in Energy Usage"):
+        st.markdown("""
+        This section detects and visualizes **monthly anomalies in energy usage** using Isolation Forest.  
+        You can explore anomalies by selecting a specific month.
+        """)
+
+
+
+        df['month'] = df.index.to_series().dt.to_period('M').astype(str)
+        df['Anomaly_Month'] = 1  
+
+        for month in df['month'].unique():
+            month_df = df[df['month'] == month][['use [kW]', 'temperature', 'humidity']].dropna()
+            if len(month_df) > 100:
+                X_scaled = StandardScaler().fit_transform(month_df)
+                preds = IsolationForest(contamination=0.03, random_state=42).fit_predict(X_scaled)
+                df.loc[month_df.index, 'Anomaly_Month'] = preds  # -1 = anomaly
+
+        available_months = sorted(df['month'].dropna().unique())
+        selected_month = st.selectbox("Select a month to explore anomalies", available_months)
+
+        month_df = df[df['month'] == selected_month]
+
+        if month_df.empty:
+            st.warning("No data available for selected month.")
+        else:
+            fig_month = go.Figure()
+            fig_month.add_trace(go.Scatter(
+                x=month_df.index, y=month_df['use [kW]'],
+                mode='lines', name='Energy Usage'
+            ))
+            fig_month.add_trace(go.Scatter(
+                x=month_df[month_df['Anomaly_Month'] == -1].index,
+                y=month_df[month_df['Anomaly_Month'] == -1]['use [kW]'],
+                mode='markers', name='Anomalies',
+                marker=dict(color='red', size=6)
+            ))
+            fig_month.update_layout(
+                title=f"🚨 Energy Usage with Anomalies in {selected_month}",
+                xaxis_title="Time", yaxis_title="use [kW]"
+            )
+            st.plotly_chart(fig_month, use_container_width=True)
 
 # ====================== MAIN APP ======================
-def main():
-    with st.spinner("Loading data..."):
-        df = load_data()
-    
-    with st.spinner("Processing data..."):
-        processed_df = process_data(df)
-    
+# ====================== SIDEBAR ================================
+def render_sidebar(processed_df):
     with st.sidebar:
         st.title("🏠 Navigation")
-        page = st.radio(
-            "Select page",
-            ["🏠 Overview", "🔌 Devices", "📈 Forecasting", "🌤️ Weather"],
-            index=0
+
+        # Custom radio button style
+        st.markdown("""
+            <style>
+            .stRadio > div {
+                flex-direction: row;
+                gap: 10px;
+                justify-content: center;
+            }
+            div[role=radiogroup] > label {
+                background-color: #f0f2f6;
+                padding: 0.5rem 1rem;
+                border-radius: 8px;
+                cursor: pointer;
+                font-weight: 600;
+                border: 2px solid transparent;
+                transition: 0.2s ease-in-out;
+            }
+            div[role=radiogroup] > label:hover {
+                border-color: #1f77b4;
+            }
+            div[role=radiogroup] > label[data-selected="true"] {
+                background-color: #1f77b4;
+                color: white;
+                border-color: #1f77b4;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+        tabs = ["🏠 Overview", "🔌 Devices", "📈 Forecasting", "🌤️ Weather"]
+
+        selected_tab = st.radio(
+            "Select a page:",
+            tabs,
+            index=tabs.index(st.session_state.get("selected_tab", tabs[0])),
+            label_visibility="collapsed"
         )
-        
+
+        page = selected_tab
+
         st.markdown("---")
-        st.markdown("**Data Summary**")
-        
+        st.markdown("### 📅 Data Summary")
+
         if processed_df is not None:
             try:
                 st.metric("Date Range", 
-                         f"{processed_df['date'].min().strftime('%d/%m/%Y')} to "
-                         f"{processed_df['date'].max().strftime('%d/%m/%Y')}")
+                          f"{processed_df['date'].min().strftime('%d/%m/%Y')} → "
+                          f"{processed_df['date'].max().strftime('%d/%m/%Y')}")
             except Exception as e:
                 st.error(f"Summary display error: {str(e)}")
         else:
             st.warning("No data available")
-        
+
         st.markdown("---")
 
-        if processed_df is not None and st.button("Create Data Sample"):
+        if processed_df is not None and st.button("📥 Download Sample (CSV)"):
             try:
                 sample = processed_df.sample(min(1000, len(processed_df)))
                 csv = sample.to_csv(index=True).encode('utf-8')
@@ -2660,8 +2864,20 @@ def main():
                 )
             except Exception as e:
                 st.error(f"Sample creation error: {str(e)}")
-    
+
+        return page
+
+# ====================== MAIN ENTRY =============================
+def main():
+    with st.spinner("🔄 Loading data..."):
+        df = load_data()
+
+    with st.spinner("⚙️ Processing data..."):
+        processed_df = process_data(df)
+
     if processed_df is not None:
+        page = render_sidebar(processed_df)
+
         if page == "🏠 Overview":
             overview_page(processed_df)
         elif page == "🔌 Devices":
@@ -2670,8 +2886,8 @@ def main():
             forecasting_page(processed_df)
         elif page == "🌤️ Weather":
             weather_page(processed_df)
-
     else:
-        st.error("Failed to load data. Please check data file and try again.")
+        st.error("❌ Failed to load data. Please check data file and try again.")
+
 if __name__ == "__main__":
     main()
