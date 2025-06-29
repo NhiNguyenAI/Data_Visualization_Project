@@ -15,6 +15,7 @@ import xgboost as xgb
 import statsmodels.api as sm
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 import traceback
 
 # ====================== APP CONFIGURATION ======================
@@ -1625,9 +1626,12 @@ def devices_page(df):
         except Exception as e:
             st.error(f"Error processing correlation data: {str(e)}")
 
+
+
 def forecasting_page(df):
     """
     Page showing time series forecasting for daily energy consumption and a selected device's daily energy consumption.
+    Includes comparison of Prophet and ARIMA models using MAE and RMSE.
     """
     st.header("📈 Energy Consumption Forecasting")
     
@@ -1636,6 +1640,81 @@ def forecasting_page(df):
         return
     
     tab1, tab2 = st.tabs(["📈 Energy Usage & Generation Forecasting", "📈 Device Energy Consumption Forecasting"])
+    
+    def evaluate_forecasts(historical_data, prophet_forecast, arima_forecast, validation_period):
+        """
+        Evaluate Prophet and ARIMA forecasts using MAE and RMSE for the validation period.
+        """
+        # Filter historical data for the validation period
+        validation_data = historical_data[historical_data['ds'].dt.date >= (historical_data['ds'].max().date() - timedelta(days=validation_period))]
+        
+        # Get Prophet forecast for validation period
+        prophet_val = prophet_forecast[
+            (prophet_forecast['ds'].dt.date >= validation_data['ds'].min().date()) &
+            (prophet_forecast['ds'].dt.date <= validation_data['ds'].max().date())
+        ][['ds', 'yhat']].rename(columns={'yhat': 'yhat_prophet'})
+        
+        # Get ARIMA forecast for validation period
+        arima_val = arima_forecast[
+            (arima_forecast['ds'].dt.date >= validation_data['ds'].min().date()) &
+            (arima_forecast['ds'].dt.date <= validation_data['ds'].max().date())
+        ][['ds', 'yhat']].rename(columns={'yhat': 'yhat_arima'})
+        
+        # Merge with actual validation data
+        validation_data = validation_data[['ds', 'y']].merge(
+            prophet_val[['ds', 'yhat_prophet']], on='ds', how='left'
+        ).merge(
+            arima_val[['ds', 'yhat_arima']], on='ds', how='left'
+        )
+        
+        # Drop rows with missing forecasts
+        validation_data = validation_data.dropna()
+        
+        if validation_data.empty:
+            return None, None, None, None
+        
+        # Calculate MAE and RMSE
+        prophet_mae = mean_absolute_error(validation_data['y'], validation_data['yhat_prophet'])
+        prophet_rmse = np.sqrt(mean_squared_error(validation_data['y'], validation_data['yhat_prophet']))
+        arima_mae = mean_absolute_error(validation_data['y'], validation_data['yhat_arima'])
+        arima_rmse = np.sqrt(mean_squared_error(validation_data['y'], validation_data['yhat_arima']))
+        
+        return prophet_mae, prophet_rmse, arima_mae, arima_rmse 
+    def display_forecast_comparison(prophet_mae, prophet_rmse, arima_mae, arima_rmse, metric_name):
+        """
+        Display comparison of Prophet and ARIMA forecasts with MAE and RMSE metrics.
+        """
+        st.subheader("📊 Model Comparison: Prophet vs ARIMA")
+        
+        if prophet_mae is None or prophet_rmse is None or arima_mae is None or arima_rmse is None:
+            st.warning("Insufficient data to compare models.")
+            return
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Prophet Model**")
+            st.metric("Mean Absolute Error (MAE)", f"{prophet_mae:.2f} kWh")
+            st.metric("Root Mean Squared Error (RMSE)", f"{prophet_rmse:.2f} kWh")
+        with col2:
+            st.markdown("**ARIMA Model**")
+            st.metric("Mean Absolute Error (MAE)", f"{arima_mae:.2f} kWh")
+            st.metric("Root Mean Squared Error (RMSE)", f"{arima_rmse:.2f} kWh")
+        
+        # Determine which model is better
+        st.markdown("**Conclusion**")
+        if prophet_mae < arima_mae and prophet_rmse < arima_rmse:
+            st.success(f"Prophet performs better for {metric_name}, with lower MAE ({prophet_mae:.2f} vs {arima_mae:.2f}) and RMSE ({prophet_rmse:.2f} vs {arima_rmse:.2f}).")
+        elif arima_mae < prophet_mae and arima_rmse < prophet_rmse:
+            st.success(f"ARIMA performs better for {metric_name}, with lower MAE ({arima_mae:.2f} vs {arima_mae:.2f}) and RMSE ({arima_rmse:.2f} vs {prophet_rmse:.2f}).")
+        else:
+            st.info(f"Performance is mixed for {metric_name}. Prophet has {'lower MAE' if prophet_mae < arima_mae else 'higher MAE'} ({prophet_mae:.2f} vs {arima_mae:.2f}) and {'lower RMSE' if prophet_rmse < arima_rmse else 'higher RMSE'} ({prophet_rmse:.2f} vs {arima_rmse:.2f}). Consider data patterns and forecast horizon when choosing a model.")
+
+        with st.expander("ℹ️ How to interpret MAE and RMSE"):
+            st.markdown("""
+            - **MAE (Mean Absolute Error)**: Measures the average absolute difference between predicted and actual values. Lower values indicate better accuracy.
+            - **RMSE (Root Mean Squared Error)**: Measures the square root of the average squared differences. It penalizes larger errors more heavily than MAE.
+            - **Model Selection**: The model with lower MAE and RMSE is generally better. Prophet captures seasonal patterns well, while ARIMA is suited for stationary data with short-term dependencies.
+            """)
     
     with tab1:
         st.markdown("")
@@ -1741,25 +1820,28 @@ def forecasting_page(df):
             if daily_data['ds'].max().date() != end_date:
                 st.warning(f"Data ends at {daily_data['ds'].max().date().strftime('%d/%m/%Y')}, not {end_date.strftime('%d/%m/%Y')}. Adjusting forecast start.")
 
+            # Split data into training and validation sets (last 14 days for validation if available)
+            validation_period = min(14, len(daily_data) // 2)  # Use up to 14 days or half the data
+            train_data = daily_data.iloc[:-validation_period].copy()
             # Prophet Forecasting
             prophet_model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
-            prophet_model.fit(daily_data[['ds', 'y']])
+            prophet_model.fit(train_data[['ds', 'y']])
 
-            # Create future dataframe for Prophet
-            future_dates = prophet_model.make_future_dataframe(periods=forecast_horizon, freq='D')
+            # Create future dataframe for Prophet (including validation period + forecast horizon)
+            future_dates = prophet_model.make_future_dataframe(periods=forecast_horizon + validation_period, freq='D')
             prophet_forecast = prophet_model.predict(future_dates)
             prophet_forecast = prophet_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
             # ARIMA Forecasting
-            arima_model = ARIMA(daily_data['y'], order=(5, 1, 0))
+            arima_model = ARIMA(train_data['y'], order=(5, 1, 0))
             arima_results = arima_model.fit()
-            arima_forecast = arima_results.get_forecast(steps=forecast_horizon)
+            arima_forecast = arima_results.get_forecast(steps=forecast_horizon + validation_period)
             arima_mean = arima_forecast.predicted_mean
             arima_conf_int = arima_forecast.conf_int(alpha=0.05)
             
             # Prepare ARIMA forecast dataframe
-            last_date = daily_data['ds'].max()
-            arima_dates = pd.date_range(start=last_date, periods=forecast_horizon + 1, freq='D')[1:]
+            last_date = train_data['ds'].max()
+            arima_dates = pd.date_range(start=last_date, periods=forecast_horizon + validation_period + 1, freq='D')[1:]
             forecast_arima = pd.DataFrame({
                 'ds': arima_dates,
                 'yhat': arima_mean.values,
@@ -1768,13 +1850,16 @@ def forecasting_page(df):
             })
             
             # Set historical yhat, yhat_lower, yhat_upper to y for consistency
-            historical_arima = daily_data[['ds', 'y']].copy()
+            historical_arima = train_data[['ds', 'y']].copy()
             historical_arima['yhat'] = historical_arima['y']
             historical_arima['yhat_lower'] = historical_arima['y']
             historical_arima['yhat_upper'] = historical_arima['y']
             
-            # Concatenate historical and forecast data
+            # Concatenate historical and forecast data for ARIMA
             arima_forecast_df = pd.concat([historical_arima[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], forecast_arima], ignore_index=True)
+
+            # Evaluate forecasts
+            prophet_mae, prophet_rmse, arima_mae, arima_rmse = evaluate_forecasts(daily_data, prophet_forecast, arima_forecast_df, validation_period)
 
             # Combine historical and forecast data for visualization
             historical_data = daily_data[['ds', 'y']].copy()
@@ -1938,10 +2023,13 @@ def forecasting_page(df):
 
             st.plotly_chart(fig, use_container_width=True)
 
+            # Display model comparison
+            display_forecast_comparison(prophet_mae, prophet_rmse, arima_mae, arima_rmse, selected_metric.replace(' [kW]', ''))
+
             # Display forecast summary
             st.subheader("📊 Forecast Summary")
             forecast_only_prophet = prophet_forecast[prophet_forecast['ds'] > daily_data['ds'].max()]
-            forecast_only_arima = forecast_arima.copy()
+            forecast_only_arima = forecast_arima[forecast_arima['ds'] > daily_data['ds'].max()]
             
             if not forecast_only_prophet.empty and not forecast_only_arima.empty:
                 col1, col2 = st.columns(2)
@@ -2076,25 +2164,29 @@ def forecasting_page(df):
             if daily_data['ds'].max().date() != end_date:
                 st.warning(f"Data ends at {daily_data['ds'].max().date().strftime('%d/%m/%Y')}, not {end_date.strftime('%d/%m/%Y')}. Adjusting forecast start.")
 
+            # Split data into training and validation sets (last 14 days for validation if available)
+            validation_period = min(14, len(daily_data) // 2)  # Use up to 14 days or half the data
+            train_data = daily_data.iloc[:-validation_period].copy()
+
             # Prophet Forecasting
             prophet_model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
-            prophet_model.fit(daily_data[['ds', 'y']])
+            prophet_model.fit(train_data[['ds', 'y']])
 
-            # Create future dataframe for Prophet
-            future_dates = prophet_model.make_future_dataframe(periods=forecast_horizon, freq='D')
+            # Create future dataframe for Prophet (including validation period + forecast horizon)
+            future_dates = prophet_model.make_future_dataframe(periods=forecast_horizon + validation_period, freq='D')
             prophet_forecast = prophet_model.predict(future_dates)
             prophet_forecast = prophet_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
 
             # ARIMA Forecasting
-            arima_model = ARIMA(daily_data['y'], order=(5, 1, 0))
+            arima_model = ARIMA(train_data['y'], order=(5, 1, 0))
             arima_results = arima_model.fit()
-            arima_forecast = arima_results.get_forecast(steps=forecast_horizon)
+            arima_forecast = arima_results.get_forecast(steps=forecast_horizon + validation_period)
             arima_mean = arima_forecast.predicted_mean
             arima_conf_int = arima_forecast.conf_int(alpha=0.05)
             
             # Prepare ARIMA forecast dataframe
-            last_date = daily_data['ds'].max()
-            arima_dates = pd.date_range(start=last_date, periods=forecast_horizon + 1, freq='D')[1:]
+            last_date = train_data['ds'].max()
+            arima_dates = pd.date_range(start=last_date, periods=forecast_horizon + validation_period + 1, freq='D')[1:]
             forecast_arima = pd.DataFrame({
                 'ds': arima_dates,
                 'yhat': arima_mean.values,
@@ -2103,13 +2195,16 @@ def forecasting_page(df):
             })
             
             # Set historical yhat, yhat_lower, yhat_upper to y for consistency
-            historical_arima = daily_data[['ds', 'y']].copy()
+            historical_arima = train_data[['ds', 'y']].copy()
             historical_arima['yhat'] = historical_arima['y']
             historical_arima['yhat_lower'] = historical_arima['y']
             historical_arima['yhat_upper'] = historical_arima['y']
             
             # Concatenate historical and forecast data
             arima_forecast_df = pd.concat([historical_arima[['ds', 'yhat', 'yhat_lower', 'yhat_upper']], forecast_arima], ignore_index=True)
+
+            # Evaluate forecasts
+            prophet_mae, prophet_rmse, arima_mae, arima_rmse = evaluate_forecasts(daily_data, prophet_forecast, arima_forecast_df, validation_period)
 
             # Combine historical and forecast data for visualization
             historical_data = daily_data[['ds', 'y']].copy()
@@ -2273,10 +2368,13 @@ def forecasting_page(df):
 
             st.plotly_chart(fig, use_container_width=True)
 
+            # Display model comparison
+            display_forecast_comparison(prophet_mae, prophet_rmse, arima_mae, arima_rmse, selected_device.replace(' [kW]', ''))
+
             # Display forecast summary
             st.subheader("📊 Forecast Summary")
             forecast_only_prophet = prophet_forecast[prophet_forecast['ds'] > daily_data['ds'].max()]
-            forecast_only_arima = forecast_arima.copy()
+            forecast_only_arima = forecast_arima[forecast_arima['ds'] > daily_data['ds'].max()]
             
             if not forecast_only_prophet.empty and not forecast_only_arima.empty:
                 col1, col2 = st.columns(2)
@@ -2437,8 +2535,8 @@ def render_weather_trends_tab(df):
         fig.update_layout(
             title="Daily Energy Usage and Weather Variable",
             xaxis_title="Date",
-            yaxis=dict(title="Energy Usage (kWh)", titlefont=dict(color="#1f77b4")),
-            yaxis2=dict(title=weather_options[selected_weather], titlefont=dict(color="orange"),
+            yaxis=dict(title="Energy Usage (kWh)", title_font=dict(color="#1f77b4")),
+            yaxis2=dict(title=weather_options[selected_weather], title_font=dict(color="orange"),
                         overlaying='y', side='right'),
             hovermode="x unified"
         )
@@ -2456,8 +2554,8 @@ def render_weather_trends_tab(df):
             xaxis=dict(title="Month", tickmode='array', tickvals=list(range(1, 13)),
                        ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']),
-            yaxis=dict(title="Energy Usage (kWh)", titlefont=dict(color="#1f77b4")),
-            yaxis2=dict(title=weather_options[selected_weather], titlefont=dict(color="orange"),
+            yaxis=dict(title="Energy Usage (kWh)", title_font=dict(color="#1f77b4")),
+            yaxis2=dict(title=weather_options[selected_weather], title_font=dict(color="orange"),
                         overlaying='y', side='right'),
             hovermode="x unified"
         )
