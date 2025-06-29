@@ -1626,8 +1626,6 @@ def devices_page(df):
         except Exception as e:
             st.error(f"Error processing correlation data: {str(e)}")
 
-
-
 def forecasting_page(df):
     """
     Page showing time series forecasting for daily energy consumption and a selected device's daily energy consumption.
@@ -1640,82 +1638,6 @@ def forecasting_page(df):
         return
     
     tab1, tab2 = st.tabs(["📈 Energy Usage & Generation Forecasting", "📈 Device Energy Consumption Forecasting"])
-    
-    def evaluate_forecasts(historical_data, prophet_forecast, arima_forecast, validation_period):
-        """
-        Evaluate Prophet and ARIMA forecasts using MAE and RMSE for the validation period.
-        """
-        # Filter historical data for the validation period
-        validation_data = historical_data[historical_data['ds'].dt.date >= (historical_data['ds'].max().date() - timedelta(days=validation_period))]
-        
-        # Get Prophet forecast for validation period
-        prophet_val = prophet_forecast[
-            (prophet_forecast['ds'].dt.date >= validation_data['ds'].min().date()) &
-            (prophet_forecast['ds'].dt.date <= validation_data['ds'].max().date())
-        ][['ds', 'yhat']].rename(columns={'yhat': 'yhat_prophet'})
-        
-        # Get ARIMA forecast for validation period
-        arima_val = arima_forecast[
-            (arima_forecast['ds'].dt.date >= validation_data['ds'].min().date()) &
-            (arima_forecast['ds'].dt.date <= validation_data['ds'].max().date())
-        ][['ds', 'yhat']].rename(columns={'yhat': 'yhat_arima'})
-        
-        # Merge with actual validation data
-        validation_data = validation_data[['ds', 'y']].merge(
-            prophet_val[['ds', 'yhat_prophet']], on='ds', how='left'
-        ).merge(
-            arima_val[['ds', 'yhat_arima']], on='ds', how='left'
-        )
-        
-        # Drop rows with missing forecasts
-        validation_data = validation_data.dropna()
-        
-        if validation_data.empty:
-            return None, None, None, None
-        
-        # Calculate MAE and RMSE
-        prophet_mae = mean_absolute_error(validation_data['y'], validation_data['yhat_prophet'])
-        prophet_rmse = np.sqrt(mean_squared_error(validation_data['y'], validation_data['yhat_prophet']))
-        arima_mae = mean_absolute_error(validation_data['y'], validation_data['yhat_arima'])
-        arima_rmse = np.sqrt(mean_squared_error(validation_data['y'], validation_data['yhat_arima']))
-        
-        return prophet_mae, prophet_rmse, arima_mae, arima_rmse 
-    def display_forecast_comparison(prophet_mae, prophet_rmse, arima_mae, arima_rmse, metric_name):
-        """
-        Display comparison of Prophet and ARIMA forecasts with MAE and RMSE metrics.
-        """
-        st.subheader("📊 Model Comparison: Prophet vs ARIMA")
-        
-        if prophet_mae is None or prophet_rmse is None or arima_mae is None or arima_rmse is None:
-            st.warning("Insufficient data to compare models.")
-            return
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Prophet Model**")
-            st.metric("Mean Absolute Error (MAE)", f"{prophet_mae:.2f} kWh")
-            st.metric("Root Mean Squared Error (RMSE)", f"{prophet_rmse:.2f} kWh")
-        with col2:
-            st.markdown("**ARIMA Model**")
-            st.metric("Mean Absolute Error (MAE)", f"{arima_mae:.2f} kWh")
-            st.metric("Root Mean Squared Error (RMSE)", f"{arima_rmse:.2f} kWh")
-        
-        # Determine which model is better
-        st.markdown("**Conclusion**")
-        if prophet_mae < arima_mae and prophet_rmse < arima_rmse:
-            st.success(f"Prophet performs better for {metric_name}, with lower MAE ({prophet_mae:.2f} vs {arima_mae:.2f}) and RMSE ({prophet_rmse:.2f} vs {arima_rmse:.2f}).")
-        elif arima_mae < prophet_mae and arima_rmse < prophet_rmse:
-            st.success(f"ARIMA performs better for {metric_name}, with lower MAE ({arima_mae:.2f} vs {arima_mae:.2f}) and RMSE ({arima_rmse:.2f} vs {prophet_rmse:.2f}).")
-        else:
-            st.info(f"Performance is mixed for {metric_name}. Prophet has {'lower MAE' if prophet_mae < arima_mae else 'higher MAE'} ({prophet_mae:.2f} vs {arima_mae:.2f}) and {'lower RMSE' if prophet_rmse < arima_rmse else 'higher RMSE'} ({prophet_rmse:.2f} vs {arima_rmse:.2f}). Consider data patterns and forecast horizon when choosing a model.")
-
-        with st.expander("ℹ️ How to interpret MAE and RMSE"):
-            st.markdown("""
-            - **MAE (Mean Absolute Error)**: Measures the average absolute difference between predicted and actual values. Lower values indicate better accuracy.
-            - **RMSE (Root Mean Squared Error)**: Measures the square root of the average squared differences. It penalizes larger errors more heavily than MAE.
-            - **Model Selection**: The model with lower MAE and RMSE is generally better. Prophet captures seasonal patterns well, while ARIMA is suited for stationary data with short-term dependencies.
-            """)
-    
     with tab1:
         st.markdown("")
         # Get available date range
@@ -2407,6 +2329,82 @@ def forecasting_page(df):
         except Exception as e:
             st.error(f"Error in device forecasting: {str(e)}")
             st.exception(e)
+
+def evaluate_forecasts(historical_data, prophet_forecast, arima_forecast, validation_period):
+        """
+        Evaluate Prophet and ARIMA forecasts using MAE and RMSE for the validation period.
+        """
+        # Filter historical data for the validation period
+        validation_data = historical_data[historical_data['ds'].dt.date >= (historical_data['ds'].max().date() - timedelta(days=validation_period))]
+        
+        # Get Prophet forecast for validation period
+        prophet_val = prophet_forecast[
+            (prophet_forecast['ds'].dt.date >= validation_data['ds'].min().date()) &
+            (prophet_forecast['ds'].dt.date <= validation_data['ds'].max().date())
+        ][['ds', 'yhat']].rename(columns={'yhat': 'yhat_prophet'})
+        
+        # Get ARIMA forecast for validation period
+        arima_val = arima_forecast[
+            (arima_forecast['ds'].dt.date >= validation_data['ds'].min().date()) &
+            (arima_forecast['ds'].dt.date <= validation_data['ds'].max().date())
+        ][['ds', 'yhat']].rename(columns={'yhat': 'yhat_arima'})
+        
+        # Merge with actual validation data
+        validation_data = validation_data[['ds', 'y']].merge(
+            prophet_val[['ds', 'yhat_prophet']], on='ds', how='left'
+        ).merge(
+            arima_val[['ds', 'yhat_arima']], on='ds', how='left'
+        )
+        
+        # Drop rows with missing forecasts
+        validation_data = validation_data.dropna()
+        
+        if validation_data.empty:
+            return None, None, None, None
+        
+        # Calculate MAE and RMSE
+        prophet_mae = mean_absolute_error(validation_data['y'], validation_data['yhat_prophet'])
+        prophet_rmse = np.sqrt(mean_squared_error(validation_data['y'], validation_data['yhat_prophet']))
+        arima_mae = mean_absolute_error(validation_data['y'], validation_data['yhat_arima'])
+        arima_rmse = np.sqrt(mean_squared_error(validation_data['y'], validation_data['yhat_arima']))
+        
+        return prophet_mae, prophet_rmse, arima_mae, arima_rmse 
+def display_forecast_comparison(prophet_mae, prophet_rmse, arima_mae, arima_rmse, metric_name):
+        """
+        Display comparison of Prophet and ARIMA forecasts with MAE and RMSE metrics.
+        """
+        st.subheader("📊 Model Comparison: Prophet vs ARIMA")
+        
+        if prophet_mae is None or prophet_rmse is None or arima_mae is None or arima_rmse is None:
+            st.warning("Insufficient data to compare models.")
+            return
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Prophet Model**")
+            st.metric("Mean Absolute Error (MAE)", f"{prophet_mae:.2f} kWh")
+            st.metric("Root Mean Squared Error (RMSE)", f"{prophet_rmse:.2f} kWh")
+        with col2:
+            st.markdown("**ARIMA Model**")
+            st.metric("Mean Absolute Error (MAE)", f"{arima_mae:.2f} kWh")
+            st.metric("Root Mean Squared Error (RMSE)", f"{arima_rmse:.2f} kWh")
+        
+        # Determine which model is better
+        st.markdown("**Conclusion**")
+        if prophet_mae < arima_mae and prophet_rmse < arima_rmse:
+            st.success(f"Prophet performs better for {metric_name}, with lower MAE ({prophet_mae:.2f} vs {arima_mae:.2f}) and RMSE ({prophet_rmse:.2f} vs {arima_rmse:.2f}).")
+        elif arima_mae < prophet_mae and arima_rmse < prophet_rmse:
+            st.success(f"ARIMA performs better for {metric_name}, with lower MAE ({arima_mae:.2f} vs {arima_mae:.2f}) and RMSE ({arima_rmse:.2f} vs {prophet_rmse:.2f}).")
+        else:
+            st.info(f"Performance is mixed for {metric_name}. Prophet has {'lower MAE' if prophet_mae < arima_mae else 'higher MAE'} ({prophet_mae:.2f} vs {arima_mae:.2f}) and {'lower RMSE' if prophet_rmse < arima_rmse else 'higher RMSE'} ({prophet_rmse:.2f} vs {arima_rmse:.2f}). Consider data patterns and forecast horizon when choosing a model.")
+
+        with st.expander("ℹ️ How to interpret MAE and RMSE"):
+            st.markdown("""
+            - **MAE (Mean Absolute Error)**: Measures the average absolute difference between predicted and actual values. Lower values indicate better accuracy.
+            - **RMSE (Root Mean Squared Error)**: Measures the square root of the average squared differences. It penalizes larger errors more heavily than MAE.
+            - **Model Selection**: The model with lower MAE and RMSE is generally better. Prophet captures seasonal patterns well, while ARIMA is suited for stationary data with short-term dependencies.
+            """)
+     
 # ====================== WEATHER PAGE ======================
 def weather_page(df):
     """
