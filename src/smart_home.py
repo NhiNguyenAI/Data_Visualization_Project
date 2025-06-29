@@ -2437,8 +2437,8 @@ def render_weather_trends_tab(df):
         fig.update_layout(
             title="Daily Energy Usage and Weather Variable",
             xaxis_title="Date",
-            yaxis=dict(title="Energy Usage (kWh)", titlefont=dict(color="#1f77b4")),
-            yaxis2=dict(title=weather_options[selected_weather], titlefont=dict(color="orange"),
+            yaxis=dict(title="Energy Usage (kWh)", title_font=dict(color="#1f77b4")),
+            yaxis2=dict(title=weather_options[selected_weather], title_font=dict(color="orange"),
                         overlaying='y', side='right'),
             hovermode="x unified"
         )
@@ -2456,8 +2456,8 @@ def render_weather_trends_tab(df):
             xaxis=dict(title="Month", tickmode='array', tickvals=list(range(1, 13)),
                        ticktext=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']),
-            yaxis=dict(title="Energy Usage (kWh)", titlefont=dict(color="#1f77b4")),
-            yaxis2=dict(title=weather_options[selected_weather], titlefont=dict(color="orange"),
+            yaxis=dict(title="Energy Usage (kWh)", title_font=dict(color="#1f77b4")),
+            yaxis2=dict(title=weather_options[selected_weather], title_font=dict(color="orange"),
                         overlaying='y', side='right'),
             hovermode="x unified"
         )
