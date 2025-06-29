@@ -1626,8 +1626,6 @@ def devices_page(df):
         except Exception as e:
             st.error(f"Error processing correlation data: {str(e)}")
 
-
-
 def forecasting_page(df):
     """
     Page showing time series forecasting for daily energy consumption and a selected device's daily energy consumption.
